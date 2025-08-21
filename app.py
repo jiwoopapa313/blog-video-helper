@@ -261,3 +261,155 @@ with tab5:
         st.download_button("⬇️ Blog_Package.md", blog_txt, file_name="Blog_Package.md")
 
 st.caption("※ 이미지 생성은 대표님이 원하실 때만 3번 탭에서 실행하세요. (자동 생성 안 함)")
+
+# =============================
+# 🎬 유튜브·블로그 통합 (복사버튼) — 추가 섹션
+# =============================
+try:
+    import json, uuid
+    from streamlit.components.v1 import html as comp_html
+
+    st.markdown("---")
+    st.header("🎬 유튜브·블로그 통합 생성 — 제목 우선 · 태그 마지막 · 복사버튼")
+
+    def copy_block(title: str, text: str, height: int = 140):
+        key = str(uuid.uuid4()).replace('-', '')
+        comp_html(f"""
+        <div style='border:1px solid #e5e7eb;border-radius:10px;padding:10px;margin:8px 0'>
+          <div style='font-weight:600;margin-bottom:6px'>{title}</div>
+          <textarea id='ta{key}' style='width:100%;height:{height}px;border:1px solid #d1d5db;border-radius:8px;padding:8px;'>{text}</textarea>
+          <button onclick=\"navigator.clipboard.writeText(document.getElementById('ta{key}').value)\" style='margin-top:8px;padding:6px 10px;border-radius:8px;border:1px solid #d1d5db;cursor:pointer;'>📋 복사</button>
+        </div>
+        """, height=height+110)
+
+    topic_all = st.text_input("주제(통합)", value="치매 예방 두뇌 건강법", key="ytbl_topic_all")
+    audience_all = st.selectbox("타깃(통합)", ["50~70대 시니어", "30~50대 주부", "일반 성인"], index=0, key="ytbl_aud_all")
+
+    st.markdown("**출력 순서 고정** — 유튜브: 제목→설명→자막(챕터별 복사)→이미지 프롬프트(복사)→해시태그 / 블로그: 제목→본문(≥1500자)→이미지 프롬프트→태그")
+
+    colY, colB = st.columns(2)
+
+    with colY:
+        st.subheader("📺 유튜브 패키지")
+        if st.button("▶ 유튜브 생성", key="yt_all_btn"):
+            sys = (
+                "You are a Korean YouTube content writer. Output only valid JSON following the schema. "
+                "Create longer, natural Korean text for seniors."
+            )
+            user = f"""
+[주제] {topic_all}
+[타깃] {audience_all}
+[요구]
+- JSON schema:
+{{
+  "titles": ["...", "...", "..."],
+  "description": "...",
+  "chapters": [
+     {{"title":"인트로","script":"..."}},
+     {{"title":"챕터1","script":"..."}},
+     {{"title":"챕터2","script":"..."}},
+     {{"title":"챕터3","script":"..."}},
+     {{"title":"챕터4","script":"..."}},
+     {{"title":"챕터5","script":"..."}},
+     {{"title":"엔딩","script":"..."}}
+  ],
+  "image_prompts": [
+     {{"label":"썸네일","en":"...","ko":"..."}},
+     {{"label":"본문1","en":"...","ko":"..."}},
+     {{"label":"본문2","en":"...","ko":"..."}}
+  ],
+  "hashtags": ["#..", "#..", "#..", "#.."]
+}}
+- Rules:
+  1) Put video titles first in array. 2) Description concise but inviting. 3) Each chapter script 2~4 sentences for Vrew.
+  4) Image prompts must be Korean senior context; provide English prompt and Korean gloss. 5) Hashtags at the end.
+"""
+            with st.spinner("유튜브 생성 중…"):
+                raw = chat_complete(sys, user, model_text, temperature)
+            try:
+                data = json.loads(raw)
+            except Exception:
+                sys2 = sys + " Return ONLY compact JSON without prose."
+                raw = chat_complete(sys2, user, model_text, temperature)
+                data = json.loads(raw)
+
+            st.success("유튜브 패키지 생성 완료")
+            st.markdown("**① 영상 제목 3개**")
+            st.write("
+".join([f"{i+1}. {t}" for i, t in enumerate(data.get("titles", [])[:3])]))
+            copy_block("영상 제목 전체 복사", "
+".join(data.get("titles", [])), 100)
+            st.markdown("**② 영상 설명**")
+            copy_block("영상 설명 복사", data.get("description", ""), 160)
+            st.markdown("**③ 브루 자막 (챕터별 복사 + 전체 복사)**")
+            chapters = data.get("chapters", [])
+            all_script = []
+            for i, ch in enumerate(chapters):
+                title = ch.get("title", f"챕터 {i+1}")
+                script = ch.get("script", "")
+                all_script.append(script)
+                copy_block(f"[{title}] 자막 복사", script, 140)
+            copy_block("브루 자막 — 전체 일괄 복사", "
+
+".join(all_script), 220)
+            st.markdown("**④ 이미지 프롬프트 (영문 + 한글, 복사버튼)**")
+            for p in data.get("image_prompts", []):
+                en = p.get("en", ""); ko = p.get("ko", "")
+                lbl = p.get("label", "이미지")
+                copy_block(f"[{lbl}] EN Prompt", en, 100)
+                copy_block(f"[{lbl}] KO 해석", ko, 80)
+            st.markdown("**⑤ 해시태그 (마지막)**")
+            tags = " ".join(data.get("hashtags", []))
+            copy_block("해시태그 복사", tags, 80)
+
+    with colB:
+        st.subheader("✍️ 블로그 패키지 (네이버 ≥1500자)")
+        if st.button("▶ 블로그 생성", key="blog_all_btn"):
+            sys = (
+                "You are a Korean Naver-SEO writer. Output only JSON. Ensure body length ≥ 1500 Korean characters."
+            )
+            user = f"""
+[주제] {topic_all}
+[규칙]
+- JSON schema:
+{{
+  "titles": ["...", "...", "..."],
+  "body": "(>=1500자 한국어 본문)",
+  "image_prompts": [
+     {{"label":"대표","en":"...","ko":"..."}},
+     {{"label":"본문1","en":"...","ko":"..."}},
+     {{"label":"본문2","en":"...","ko":"..."}}
+  ],
+  "hashtags": ["#..", "#..", "#.."]
+}}
+- Rules: titles first; image prompts English+Korean; hashtags appear last; tone friendly for seniors; short paragraphs.
+"""
+            with st.spinner("블로그 생성 중…"):
+                raw = chat_complete(sys, user, model_text, temperature)
+            try:
+                data = json.loads(raw)
+            except Exception:
+                sys2 = sys + " Return ONLY compact JSON without prose."
+                raw = chat_complete(sys2, user, model_text, temperature)
+                data = json.loads(raw)
+
+            st.success("블로그 패키지 생성 완료")
+            st.markdown("**① 블로그 제목 3개**")
+            st.write("
+".join([f"{i+1}. {t}" for i, t in enumerate(data.get("titles", [])[:3])]))
+            copy_block("블로그 제목 전체 복사", "
+".join(data.get("titles", [])), 100)
+            st.markdown("**② 본문 (≥1500자)**")
+            copy_block("블로그 본문 복사", data.get("body", ""), 300)
+            st.markdown("**③ 이미지 프롬프트 (영문 + 한글)**")
+            for p in data.get("image_prompts", []):
+                en = p.get("en", ""); ko = p.get("ko", "")
+                lbl = p.get("label", "이미지")
+                copy_block(f"[{lbl}] EN Prompt", en, 100)
+                copy_block(f"[{lbl}] KO 해석", ko, 80)
+            st.markdown("**④ 해시태그 (마지막)**")
+            copy_block("블로그 해시태그 복사", "
+".join(data.get("hashtags", [])), 100)
+except Exception as _e:
+    st.warning(f"통합 섹션 로딩 경고: {_e}")
+
