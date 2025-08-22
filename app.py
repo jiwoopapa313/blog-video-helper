@@ -3,10 +3,19 @@
 # =============================
 def copy_block(title: str, text: str, height: int = 160):
     """
-    - components.html의 key 미지원 환경에서도 에러 없이 동작
-    - 한 컴포넌트 안에 textarea + 버튼 + JS를 모두 넣어 DOM 분리 이슈 제거
-    - 버튼은 textarea를 참조하지 않고, 스크립트 내부 문자열을 복사하므로 충돌 없음
+    - JS/DOM 사용 안 함: components.html() 미사용
+    - Streamlit 내장 text_area 만 사용 → 어떤 환경에서도 빈 화면/DOM 에러 없음
+    - 복사는 영역 클릭 후 Ctrl+A, Ctrl+C (또는 길게 드래그)로 수행
     """
+    st.markdown(f"**{title}**")
+    st.text_area(
+        label="",
+        value=text or "",
+        height=height,
+        key="ta_" + uuid.uuid4().hex,
+    )
+    st.caption("복사 방법: 영역 클릭 → Ctrl+A → Ctrl+C (모바일은 길게 눌러 전체 선택 후 복사)")
+
     # 안전한 이스케이프를 위해 JSON 문자열로 주입
     import json as _json
     content_js = _json.dumps(text or "", ensure_ascii=False)
