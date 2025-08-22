@@ -1,4 +1,4 @@
-# app.py — 블로그·유튜브 통합 생성기 (Final)
+# app.py — 블로그·유튜브 통합 생성기 (Final, copy-block patched)
 # 요구: Streamlit Secrets 또는 환경변수에 OPENAI_API_KEY 설정
 
 import os, time, json, uuid
@@ -53,27 +53,41 @@ def chat_complete(system_prompt: str, user_prompt: str, model: str, temperature:
     return resp.choices[0].message.content.strip()
 
 # =============================
-# UI 유틸: 복사 가능한 블록
+# UI 유틸: 복사 가능한 블록  ✅patched
 # =============================
 def copy_block(title: str, text: str, height: int = 160):
-    tid = "ta" + str(uuid.uuid4()).replace("-", "")
+    # 각 컴포넌트마다 완전히 고유한 key와 textarea id 부여 → DOM 충돌 방지
+    comp_key = "k_" + uuid.uuid4().hex
+    ta_id = "ta_" + uuid.uuid4().hex
+
     esc = (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    comp_html(
-        f"""
-        <div style='border:1px solid #e5e7eb;border-radius:10px;padding:10px;margin:8px 0;'>
-          <div style='font-weight:600;margin-bottom:6px'>{title}</div>
-          <textarea id='{tid}' style='width:100%;height:{height}px;border:1px solid #d1d5db;border-radius:8px;padding:8px;'>{esc}</textarea>
-          <button onclick="navigator.clipboard.writeText(document.getElementById('{tid}').value)"
-                  style='margin-top:8px;padding:6px 10px;border-radius:8px;border:1px solid #d1d5db;cursor:pointer;'>
-            📋 복사
-          </button>
-        </div>
-        """,
-        height=height + 110,
-    )
+
+    html_str = f"""
+    <div style='border:1px solid #e5e7eb;border-radius:10px;padding:10px;margin:8px 0;'>
+      <div style='font-weight:600;margin-bottom:6px'>{title}</div>
+
+      <textarea id='{ta_id}'
+        style='width:100%;height:{height}px;border:1px solid #d1d5db;border-radius:8px;padding:8px;'
+      >{esc}</textarea>
+
+      <button
+        style='margin-top:8px;padding:6px 10px;border-radius:8px;border:1px solid #d1d5db;cursor:pointer;'
+        onclick="(async () => {{
+          try {{
+            const el = document.getElementById('{ta_id}');
+            await navigator.clipboard.writeText(el.value);
+          }} catch (e) {{
+            console.warn('Clipboard copy failed', e);
+            alert('복사가 차단되었습니다. 수동 복사(Ctrl+C)해주세요.');
+          }}
+        }})()"
+      >📋 복사</button>
+    </div>
+    """
+    comp_html(html_str, height=height + 110, scrolling=False, key=comp_key)
 
 # =============================
-# 한국 시니어 이미지 프리셋
+# 한국 시니어 이미지 프리셋 (사이드바)
 # =============================
 with st.sidebar:
     st.header("⚙️ 생성 설정")
@@ -146,12 +160,10 @@ with col1:
 with col2:
     tone = st.selectbox("톤/스타일", ["시니어 친화형", "전문가형", "친근한 설명형"], index=0)
 with col3:
-    # 자동/정보형/영업형 선택
     mode_sel = st.selectbox("콘텐츠 유형", ["자동 분류", "정보형(블로그 지수)", "시공후기형(영업)"], index=0)
 with col4:
     do_both = st.selectbox("생성 대상", ["유튜브 + 블로그", "유튜브만", "블로그만"], index=0)
 
-# 간단 자동 분류(토픽 키워드 기반 + 보수적)
 def simple_classify(topic_text: str) -> str:
     kw_sales = ["시공", "교체", "설치", "수리", "누수", "보수", "후기", "현장", "관악", "강쌤철물"]
     if any(k in topic_text for k in kw_sales):
@@ -166,20 +178,14 @@ def ensure_mode():
     return simple_classify(topic)
 
 content_mode = ensure_mode()  # "info" or "sales"
-
-# CTA 멘트(영업형만)
 CTA = "강쌤철물 집수리 관악점에 지금 바로 문의주세요. 상담문의: 010-2276-8163"
 
-# =============================
-# 생성 버튼
-# =============================
 gen = st.button("▶ 모두 생성", type="primary")
 
 # =============================
 # 유튜브/블로그 생성 로직
 # =============================
 def generate_youtube(topic, tone, chapters_n, mode, include_thumb):
-    # System prompt
     sys = (
         "You are a seasoned Korean YouTube scriptwriter for seniors. "
         "Return STRICT JSON only (no prose). Titles must be natural and clickable (no clickbait). "
@@ -188,13 +194,12 @@ def generate_youtube(topic, tone, chapters_n, mode, include_thumb):
         "include 'Korean/Asian' ethnicity, and avoid Western features by default. "
         "Include English prompt and Korean gloss for image prompts."
     )
-    # User prompt
     user = f"""
 [주제] {topic}
 [톤] {tone}
 [콘텐츠 유형] {"정보형" if mode=="info" else "시공후기형(영업)"}
 [요구]
-- EXACTLY {chapters_n} content chapters (no intro/outro in the list; keep them separate internally if needed but OUTPUT only the {chapters_n} content chapters).
+- EXACTLY {chapters_n} content chapters (no intro/outro in the list; OUTPUT only {chapters_n} content chapters).
 - JSON schema:
 {{
   "titles": ["...", "...", "..."],
@@ -218,9 +223,8 @@ def generate_youtube(topic, tone, chapters_n, mode, include_thumb):
 - Constraints:
   1) Put titles first. 2) Hashtags at the end. 3) Practical, trustworthy advice for Korean seniors.
   4) The number of items in 'chapters' and 'image_prompts' MUST be exactly {chapters_n} and aligned by index.
-  5) If '{'sales'}' mode, subtly include professional reasoning; description last line may include CTA. If 'info', never include CTA.
+  5) If 'sales' mode, allow subtle professional reasoning; description last line may include CTA. If 'info', never include CTA.
 """
-    # LLM 호출
     raw = chat_complete(sys, user, model_text, temperature)
     try:
         data = json.loads(raw)
@@ -229,7 +233,6 @@ def generate_youtube(topic, tone, chapters_n, mode, include_thumb):
         raw = chat_complete(sys2, user, model_text, temperature)
         data = json.loads(raw)
 
-    # 업스케일(선택)
     if polish_toggle:
         sys_p = "Polish Korean text for dignity/clarity; keep same JSON fields and counts. Return JSON only."
         polished = chat_complete(sys_p, json.dumps(data, ensure_ascii=False), "gpt-4o", 0.4)
@@ -237,8 +240,6 @@ def generate_youtube(topic, tone, chapters_n, mode, include_thumb):
             data = json.loads(polished)
         except Exception:
             pass
-
-    # 썸네일(옵션) — 코드 출력 단계에서 한국 프리셋으로 재조합
     return data
 
 def generate_blog(topic, tone, mode):
@@ -278,7 +279,6 @@ Return JSON with this schema:
         raw = chat_complete(sys2, user, model_text, temperature)
         data = json.loads(raw)
 
-    # 길이 보정(최소 1500자)
     body = data.get("body", "")
     if len(body) < 1500:
         sys_len = "Expand to >= 1700 Korean characters while keeping structure and [이미지: ...] markers. Return JSON only."
@@ -290,7 +290,6 @@ Return JSON with this schema:
         except Exception:
             pass
 
-    # 업스케일(선택)
     if polish_toggle:
         sys_p = "Polish Korean writing for clarity and flow. Keep JSON structure."
         polished = chat_complete(sys_p, json.dumps(data, ensure_ascii=False), "gpt-4o", 0.4)
@@ -298,14 +297,12 @@ Return JSON with this schema:
             data = json.loads(polished)
         except Exception:
             pass
-
     return data
 
 # =============================
 # 실행
 # =============================
 if gen:
-    # --- 유튜브 + 블로그 동시 또는 단일 ---
     do_yt = do_both in ["유튜브 + 블로그", "유튜브만"]
     do_blog = do_both in ["유튜브 + 블로그", "블로그만"]
 
@@ -313,7 +310,7 @@ if gen:
         st.markdown("## 📺 유튜브 패키지 — 제목→설명→자막→이미지→태그")
         yt_data = generate_youtube(topic, tone, target_chapter_count, content_mode, include_thumbnail)
 
-        # ① 영상 제목
+        # ① 제목
         st.markdown("**① 영상 제목 3개**")
         yt_titles = [f"{i+1}. {t}" for i, t in enumerate(yt_data.get("titles", [])[:3])]
         copy_block("영상 제목 복사", "\n".join(yt_titles), 110)
@@ -323,7 +320,7 @@ if gen:
         desc = yt_data.get("description", "")
         copy_block("영상 설명 복사", desc, 160)
 
-        # ③ 브루 자막 — 챕터 EXACT 동기화
+        # ③ 브루 자막
         st.markdown("**③ 브루 자막 (챕터별 복사 + 전체 복사)**")
         chapters = yt_data.get("chapters", [])[:target_chapter_count]
         all_lines = []
@@ -356,7 +353,7 @@ if gen:
             copy_block(f"[챕터 {idx}] EN (Korean preset enforced)", enforced_en, 110)
             copy_block(f"[챕터 {idx}] KO", ko_desc, 90)
 
-        # ⑤ 해시태그 (마지막)
+        # ⑤ 해시태그
         st.markdown("**⑤ 해시태그 (마지막)**")
         tags = " ".join(yt_data.get("hashtags", []))
         copy_block("해시태그 복사", tags, 80)
@@ -371,15 +368,14 @@ if gen:
         blog_titles = [f"{i+1}. {t}" for i, t in enumerate(blog_data.get("titles", [])[:3])]
         copy_block("블로그 제목 복사", "\n".join(blog_titles), 110)
 
-        # ② 본문 (≥1500자) — CTA 자동/제외
+        # ② 본문
         st.markdown("**② 본문 (≥1500자)**")
         body = blog_data.get("body", "")
         if content_mode == "sales" and CTA not in body:
-            # 마지막에 CTA 한 줄 부드럽게 추가
             body = body.rstrip() + f"\n\n{CTA}"
         copy_block("블로그 본문 복사", body, 380)
 
-        # ③ 이미지 프롬프트 (한국 프리셋)
+        # ③ 이미지 프롬프트
         st.markdown("**③ 이미지 프롬프트 (EN + KO)**")
         for p in blog_data.get("image_prompts", []):
             lbl = p.get("label", "이미지")
@@ -392,7 +388,7 @@ if gen:
             copy_block(f"[{lbl}] EN (Korean preset enforced)", enforced_en, 110)
             copy_block(f"[{lbl}] KO", ko_desc, 90)
 
-        # ④ 해시태그 (마지막)
+        # ④ 해시태그
         st.markdown("**④ 해시태그 (마지막)**")
         blog_tags = "\n".join(blog_data.get("hashtags", []))
         copy_block("블로그 태그 복사", blog_tags, 100)
