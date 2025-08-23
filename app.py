@@ -1,11 +1,5 @@
 # -*- coding: utf-8 -*-
-# 블로그·유튜브 통합 생성기 — 최종 안정화본 (2025-08)
-# - API 키 자동 점검(모델 리스트 호출)
-# - LLM 하드 타임아웃 + responses 폴백
-# - 세션 KeyError 방지: 모델값 인자 전달
-# - 중첩 스레드 제거 → 순차 실행 (워치독만 사용)
-# - 진행 로그(status) + 진행률 바
-# - schema 중괄호 f-string 오류 수정
+# 블로그·유튜브 통합 생성기 — 최종 안정화본 (세션오류/무한로딩 패치 완료)
 
 import os, re, json, time, uuid, inspect, html
 from datetime import datetime, timezone, timedelta
@@ -23,11 +17,12 @@ st.set_page_config(page_title="블로그·유튜브 통합 생성기", page_icon
 st.title("⚡ 블로그·유튜브 통합 생성기 (최종 안정화본)")
 st.caption(f"KST {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} · 한국어 고정 · EN 이미지 프롬프트 · 무한로딩 방지")
 
-# 세션 기본값
+# 세션 기본값(읽기 안전 위해 기본값을 꼭 세팅)
 st.session_state.setdefault("model_text", "gpt-4o-mini")
 st.session_state.setdefault("_humanize_calls", 0)
 st.session_state.setdefault("_humanize_used",  0.0)
 st.session_state.setdefault("people_taste", True)
+
 HUMANIZE_BUDGET_CALLS = 8
 HUMANIZE_BUDGET_SECS  = 20.0
 
@@ -212,19 +207,34 @@ def ensure_korean_lines(lines, model):
     return lines
 
 def humanize_ko(text: str, mode: str, model: str, region: str = "관악구", persona: str = "강쌤") -> str:
-    if not text: return text
-    start_ts = time.time()
-    if (st.session_state["_humanize_calls"] >= HUMANIZE_BUDGET_CALLS) or (st.session_state["_humanize_used"] >= HUMANIZE_BUDGET_SECS):
+    """세션 안전 접근(.get) + 예외 없는 업데이트"""
+    if not text:
         return text
+
+    # 안전 읽기 (스레드에서도 KeyError 방지)
+    calls = st.session_state.get("_humanize_calls", 0)
+    used  = st.session_state.get("_humanize_used", 0.0)
+
+    start_ts = time.time()
+    if (calls >= HUMANIZE_BUDGET_CALLS) or (used >= HUMANIZE_BUDGET_SECS):
+        return text
+
     style_sys = (
         "당신은 한국어 글맛을 살리는 편집자입니다. 과장/광고톤 억제, 2~3문장마다 호흡, "
         f"지역({region})과 현장전문가 '{persona}'의 말투를 약하게 스며들게."
     )
-    mode_line = "영업형: CTA는 마지막 1줄만." if mode=="sales" else "정보형: CTA 금지."
+    mode_line = "영업형: CTA는 마지막 1줄만." if mode == "sales" else "정보형: CTA 금지."
     ask = f"{mode_line}\n\n[원문]\n{text}\n\n원문 구조는 유지, 리듬과 어휘만 개선."
+
     out = chat_cached(style_sys, ask, model, 0.6)
-    st.session_state["_humanize_calls"] += 1
-    st.session_state["_humanize_used"]  += (time.time()-start_ts)
+
+    # 안전 업데이트
+    try:
+        st.session_state["_humanize_calls"] = calls + 1
+        st.session_state["_humanize_used"]  = used + (time.time() - start_ts)
+    except Exception:
+        pass
+
     return out
 
 # ========================= 타깃/이미지 프롬프트 =========================
@@ -565,4 +575,4 @@ if go:
         st.exception(e)
 
 st.markdown("---")
-st.caption("무한로딩 방지(하드 타임아웃/폴백) · 세션 접근 안전화 · 순차 실행 · API 키 자동 점검 · 본문+해시태그 일괄복사")
+st.caption("무한로딩 방지(하드 타임아웃/폴백) · 세션 접근 안전화(.get) · 순차 실행 · 모델 인자 전달 · API 키 자동 점검")
