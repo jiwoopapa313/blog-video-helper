@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# app.py — 통합본 (한국인 고정 + 자동 연령/성별 + Vrew 일괄복사 + 복사버튼 호환 + 내보내기)
+# app.py — 통합본 (한국인 고정 + 자동 연령/성별 + Vrew 일괄복사 + EN 이미지 프롬프트 only)
 import os, re, json, time, uuid, inspect, html
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor
@@ -141,7 +141,7 @@ def detect_demo_from_topic(topic: str):
         gender = "혼합"
     return age, gender
 
-# ====== 이미지 프롬프트 빌더 (한국인 고정) ======
+# ====== 이미지 프롬프트 빌더 (EN only, 텍스트 삽입 금지) ======
 def build_kr_image_en(subject_en: str, age: str, gender: str, place: str, mood: str, shot: str, style: str) -> str:
     age_en = {
         "유아":"toddlers","아동":"children","청소년":"teenagers",
@@ -160,8 +160,11 @@ def build_kr_image_en(subject_en: str, age: str, gender: str, place: str, mood: 
     mood_en  = {"따뜻한":"warm","밝은":"bright","차분한":"calm","활기찬":"energetic"}.get(mood,"warm")
     style_en = {"사진 실사":"realistic photography, high resolution","시네마틱":"cinematic photo style",
                 "잡지 화보":"editorial magazine style","자연광":"natural lighting"}.get(style,"realistic photography, high resolution")
+
+    # ★ 텍스트 삽입 금지 규칙 추가
     return (f"Korean ethnicity visible; {gender_en} {age_en} at a {place_en}, {shot_en}, {mood_en} mood, {style_en}. "
-            f"Context: {subject_en}. Asian facial features; subtle Korean signage/items; avoid Western features; high contrast.")
+            f"Context: {subject_en}. Asian facial features; subtle Korean signage/items; "
+            f"avoid Western features; high contrast; no text overlay; no captions; no labels.")
 
 # ====== 사이드바 옵션 ======
 with st.sidebar:
@@ -214,7 +217,7 @@ def ensure_mode():
     return classify(topic)
 mode = ensure_mode()
 
-# (NEW) 자동 연령/성별 → 최종 값 확정
+# 자동 연령/성별 → 최종 값 확정
 auto_age, auto_gender = detect_demo_from_topic(topic)
 final_age    = auto_age    if img_age    == "자동" else img_age
 final_gender = auto_gender if img_gender == "자동" else img_gender
@@ -223,7 +226,7 @@ if SAFE_BOOT:
     st.caption("세팅 확인 → 아래 버튼으로 생성")
 go = st.button("▶ 한 번에 생성", type="primary")
 
-# ====== LLM 스키마 ======
+# ====== LLM 스키마(이미지 EN only로 안내) ======
 def schema_for_llm(blog_min_chars:int):
     return fr'''{{
   "demographics": {{
@@ -235,15 +238,23 @@ def schema_for_llm(blog_min_chars:int):
     "description": "(정보형 4~6문장 / 영업형은 마지막 1문장 CTA 허용)",
     "chapters": [{{"title":"챕터1","script":"..."}},{{"title":"챕터2","script":"..."}},{{"title":"챕터3","script":"..."}},{{"title":"챕터4","script":"..."}},{{"title":"챕터5","script":"..."}}],
     "images": {{
-      "thumbnail": {{"en":"...","ko":"..."}},
-      "chapters": [{{"index":1,"en":"...","ko":"..."}},{{"index":2,"en":"...","ko":"..."}},{{"index":3,"en":"...","ko":"..."}},{{"index":4,"en":"...","ko":"..."}},{{"index":5,"en":"...","ko":"..."}}]
+      "thumbnail": {{"en":"(English prompt only, no text overlay)"}},
+      "chapters": [{{"index":1,"en":"(English prompt only, no text overlay)"}},
+                   {{"index":2,"en":"(English prompt only, no text overlay)"}},
+                   {{"index":3,"en":"(English prompt only, no text overlay)"}},
+                   {{"index":4,"en":"(English prompt only, no text overlay)"}},
+                   {{"index":5,"en":"(English prompt only, no text overlay)"}}]
     }},
     "hashtags": ["#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#.."]
   }},
   "blog": {{
     "titles": ["...","...","...","...","...","...","...","...","...","..."],
     "body": "서론→핵심5→체크리스트(6~8)→자가진단(5)→FAQ(3)→마무리, {blog_min_chars}+자, 본문 내 [이미지:설명] 3~5개 포함",
-    "images": [{{"label":"대표","en":"...","ko":"..."}},{{"label":"본문1","en":"...","ko":"..."}},{{"label":"본문2","en":"...","ko":"..."}},{{"label":"본문3","en":"...","ko":"..."}},{{"label":"본문4","en":"...","ko":"..."}}],
+    "images": [{{"label":"대표","en":"(English prompt only, no text overlay)"}},
+               {{"label":"본문1","en":"(English prompt only, no text overlay)"}},
+               {{"label":"본문2","en":"(English prompt only, no text overlay)"}},
+               {{"label":"본문3","en":"(English prompt only, no text overlay)"}},
+               {{"label":"본문4","en":"(English prompt only, no text overlay)"}}],
     "tags": ["#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#..","#.."]
   }}
 }}'''
@@ -254,8 +265,8 @@ def gen_youtube(topic, tone, n, mode):
       "You are a seasoned Korean YouTube scriptwriter for various age/gender audiences.\n"
       "All images must depict KOREAN ethnicity (avoid Western features) and include subtle Korean context.\n"
       "Return STRICT JSON ONLY matching the schema. Provide exactly N chapters (3~5 sentences each),\n"
-      "and provide thumbnail + 1:1 chapter image prompts (EN/KO). SEO titles (10) should include\n"
-      "main keyword in first 20 chars, optional numbers/brackets, and avoid clickbait. Hashtags 20."
+      "and provide thumbnail + 1:1 chapter image prompts in ENGLISH ONLY (no text overlay).\n"
+      "SEO titles (10) should include main keyword in first 20 chars, optional numbers/brackets, and avoid clickbait. Hashtags 20."
     )
     user = (
       f"[topic] {topic}\n"
@@ -270,17 +281,16 @@ def gen_youtube(topic, tone, n, mode):
             "titles":[f"{topic} 가이드 {i+1}" for i in range(10)],
             "description":f"{topic} 설명(폴백).",
             "chapters":[{"title":f"Tip{i+1}","script":f"{topic} 핵심 팁 {i+1} (폴백)"} for i in range(n)],
-            "images":{"thumbnail":{"en":"fallback thumb","ko":"폴백 썸네일"},
-                      "chapters":[{"index":i+1,"en":"fallback","ko":"폴백"} for i in range(n)]},
+            "images":{"thumbnail":{"en":"fallback thumb (no text overlay)"},
+                      "chapters":[{"index":i+1,"en":"fallback (no text overlay)"} for i in range(n)]},
             "hashtags":["#폴백"]*20
         },
         "blog":{"titles":[f"{topic} 블로그 {i+1}" for i in range(10)],"body":f"{topic} 폴백 본문",
-                "images":[{"label":"대표","en":"fallback","ko":"폴백"}],"tags":["#폴백"]*20},
+                "images":[{"label":"대표","en":"fallback (no text overlay)"}],"tags":["#폴백"]*20},
         "demographics":{"age_group":final_age,"gender":final_gender}
     }
     data = json_complete(sys, user, model_text, temperature, fallback)
     yt = data.get("youtube", fallback["youtube"])
-    # 영업형이면 설명 마지막 줄에 CTA 삽입
     if mode=="sales":
         desc = (yt.get("description","") or "").rstrip()
         if CTA not in desc: yt["description"] = (desc + f"\n{CTA}").strip()
@@ -293,7 +303,7 @@ def gen_blog(topic, tone, mode, min_chars, img_count):
       f"Body MUST be >= {min_chars} Korean characters and include 3~5 '[이미지: ...]' markers.\n"
       "Structure: 서론 → 핵심5 → 체크리스트(6~8) → 자가진단(5) → FAQ(3) → 마무리.\n"
       "Info mode forbids CTA. Sales mode allows ONE CTA at the very last line.\n"
-      "Provide 10 SEO titles, 20 tags, and 5 image prompts (대표+본문1~4) with EN/KO."
+      "Provide 10 SEO titles, 20 tags, and 5 EN image prompts (대표+본문1~4) with NO TEXT OVERLAY."
     )
     user = (
       f"[topic] {topic}\n"
@@ -305,14 +315,13 @@ def gen_blog(topic, tone, mode, min_chars, img_count):
     fallback = {
         "titles":[f"{topic} 블로그 {i+1}" for i in range(10)],
         "body":f"{topic} 폴백 본문",
-        "images":[{"label":"대표","en":"fallback","ko":"폴백"}]+[
-            {"label":f"본문{i}","en":"fallback","ko":"폴백"} for i in range(1,4)
+        "images":[{"label":"대표","en":"fallback (no text overlay)"}]+[
+            {"label":f"본문{i}","en":"fallback (no text overlay)"} for i in range(1,4)
         ],
         "tags":["#폴백"]*20
     }
     data = json_complete(sys, user, model_text, temperature, {"blog":fallback})
     blog = data.get("blog", fallback)
-    # 길이 보정
     if len(blog.get("body","")) < min_chars:
         try:
             blog = json.loads(chat_cached(
@@ -321,19 +330,16 @@ def gen_blog(topic, tone, mode, min_chars, img_count):
                 model_text, 0.5
             ))["blog"]
         except Exception: pass
-    # CTA 처리
     if mode=="sales":
         if CTA not in blog.get("body",""):
             blog["body"] = blog.get("body","").rstrip() + f"\n\n{CTA}"
     else:
         blog["body"] = blog.get("body","").replace(CTA,"").strip()
-    # 이미지 수 보정
     prompts = blog.get("images", [])[:img_count]
     while len(prompts) < img_count:
         i=len(prompts)
         prompts.append({"label":"대표" if i==0 else f"본문{i}",
-                        "en":f"visual for section {i} of '{topic}'",
-                        "ko":f"본문 섹션 {i} 보조 이미지"})
+                        "en":f"visual for section {i} of '{topic}' (no text overlay)"})
     blog["images"] = prompts
     return blog
 
@@ -379,7 +385,7 @@ if go:
             st.markdown("**② 영상 설명**")
             copy_block("영상 설명 복사", yt.get("description",""), 160, use_copy_button)
 
-            # ③ 브루 자막 — 전체 일괄 복사 (Vrew용)
+            # ③ 브루 자막 — 전체 일괄 복사 (Vrew)
             chapters = yt.get("chapters", [])[:target_chapter]
             full_vrew_script = "\n".join([c.get("script", "").replace("\n", " ") for c in chapters])
             st.markdown("**③ 브루 자막 — 전체 일괄 복사 (Vrew)**")
@@ -392,31 +398,28 @@ if go:
                     for i,c in enumerate(chapters,1):
                         copy_block(f"[챕터 {i}] {c.get('title',f'챕터 {i}')}", c.get("script",""), 140, use_copy_button)
 
-            # ④ 이미지 프롬프트 (썸네일 + 챕터)
-            st.markdown("**④ 이미지 프롬프트 (썸네일 + 챕터)**")
+            # ④ 이미지 프롬프트 (EN only)
+            st.markdown("**④ 이미지 프롬프트 (EN only, no text overlay)**")
             if include_thumb:
                 copy_block("[썸네일] EN",
                            build_kr_image_en(
-                               f"YouTube thumbnail for topic: {topic}. Korean title area, high contrast.",
+                               f"YouTube thumbnail for topic: {topic}. Korean setting, realistic photo.",
                                final_age, final_gender, img_place, img_mood, img_shot, img_style),
                            110, use_copy_button)
-                copy_block("[썸네일] KO",
-                           f"{final_age} {final_gender} 한국인이 {img_place}에서 주제 '{topic}'를 표현, {img_mood} 분위기, {img_style} {img_shot} — 큰 한글 제목 영역",
-                           90, use_copy_button)
 
             if show_img_blocks:
                 ips=(yt.get("images",{}) or {}).get("chapters",[])
                 if len(ips)<len(chapters):
                     for i in range(len(ips),len(chapters)):
-                        ips.append({"index":i+1,"en":"support","ko":"보조"})
+                        ips.append({"index":i+1,"en":"support (no text overlay)"})
                 expi=st.expander("챕터별 이미지 프롬프트 (펼쳐서 보기)", expanded=False)
                 with expi:
                     for i,p in enumerate(ips[:target_chapter],1):
+                        # EN만 출력
+                        base = p.get("en","") or f"support visual for chapter {i} about '{chapters[i-1].get('title','')}'"
                         copy_block(f"[챕터 {i}] EN",
-                                   build_kr_image_en(p.get("en",""), final_age, final_gender, img_place, img_mood, img_shot, img_style),
+                                   build_kr_image_en(base, final_age, final_gender, img_place, img_mood, img_shot, img_style),
                                    110, use_copy_button)
-                        ko_text = p.get("ko","") or f"{final_age} {final_gender} 한국인이 {img_place}에서 '{chapters[i-1].get('title','')}' 표현, {img_mood} {img_style} {img_shot}"
-                        copy_block(f"[챕터 {i}] KO", ko_text, 90, use_copy_button)
 
             # ⑤ 해시태그(20)
             st.markdown("**⑤ 해시태그(20)**")
@@ -442,16 +445,16 @@ if go:
             st.markdown("**② 본문 (강화 · 2,200자+)**")
             copy_block("블로그 본문 복사", blog.get("body",""), 420, use_copy_button)
 
-            # ③ 이미지 프롬프트 (EN + KO)
-            st.markdown("**③ 이미지 프롬프트 (EN + KO)**")
+            # ③ 이미지 프롬프트 (EN only)
+            st.markdown("**③ 이미지 프롬프트 (EN only, no text overlay)**")
             if show_img_blocks:
                 expb = st.expander("블로그 이미지 프롬프트 (펼쳐서 보기)", expanded=False)
                 with expb:
                     for p in blog.get("images",[]):
+                        base = p.get("en","") or f"support visual for section '{p.get('label','')}'"
                         copy_block(f"[{p.get('label','이미지')}] EN",
-                                   build_kr_image_en(p.get("en",""), final_age, final_gender, img_place, img_mood, img_shot, img_style),
+                                   build_kr_image_en(base, final_age, final_gender, img_place, img_mood, img_shot, img_style),
                                    110, use_copy_button)
-                        copy_block(f"[{p.get('label','이미지')}] KO", p.get("ko",""), 90, use_copy_button)
 
             # ④ 태그(20)
             st.markdown("**④ 태그(20)**")
@@ -468,4 +471,4 @@ if go:
         st.exception(e)
 
 st.markdown("---")
-st.caption("한국인 고정 · 주제 기반 자동 연령/성별 · Vrew 자막 일괄복사 · 정보형/영업형 CTA 분기 · 이미지 프롬프트 · 복사 버튼/내보내기 · 병렬/캐싱.")
+st.caption("한국인 고정 · 주제 기반 자동 연령/성별 · Vrew 자막 일괄복사 · EN 이미지 프롬프트 only(텍스트 삽입 금지) · 정보형/영업형 분기 · 병렬/캐싱.")
