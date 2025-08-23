@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
-# app.py — 블로그·유튜브 통합 생성기 (완전체·리팩토링)
-# 2025-08 리팩토링: 세션상태 초기화(KeyError 방지), OpenAI 호출 호환(chat→responses 폴백),
-# 진행률 텍스트 호환(일부 Streamlit 버전), 복사 컴포넌트 안정성, 타임아웃/워치독 강화
+# app.py — 블로그·유튜브 통합 생성기 (완전체·리팩토링 안정화본)
+# - 세션상태 초기화(KeyError 방지)
+# - OpenAI 호출 호환(chat → responses 폴백)
+# - 진행률 텍스트 호환(Streamlit 일부 버전)
+# - 복사 컴포넌트 안정성
+# - 타임아웃/워치독 강화
+# - schema_for_llm f-string 중괄호 오류 수정
 
 import os, re, json, time, uuid, inspect, html
 from datetime import datetime, timezone, timedelta
@@ -16,7 +20,7 @@ SAFE_BOOT    = True
 MAX_WORKERS  = 2
 CTA          = "강쌤철물 집수리 관악점에 지금 바로 문의주세요. 상담문의: 010-2276-8163"
 
-# 세션 기본값(모델 키 포함) — KeyError 방지
+# 세션 기본값 — KeyError 방지
 st.session_state.setdefault("model_text", "gpt-4o-mini")
 st.session_state.setdefault("_humanize_calls", 0)
 st.session_state.setdefault("_humanize_used",  0.0)
@@ -76,7 +80,6 @@ def copy_block(title: str, text: str, height: int = 160, use_button: bool = True
             else:
                 comp_html(html_str, height=height+110, scrolling=False)
         except TypeError:
-            # 일부 배포 환경에서 scrolling 인자 미지원
             comp_html(html_str, height=height+110)
     else:
         st.markdown(f"**{title or ''}**")
@@ -89,11 +92,11 @@ def _client():
     if not ak:
         st.warning("🔐 OPENAI_API_KEY가 없습니다. Streamlit Secrets 또는 환경변수에 설정해주세요.", icon="⚠️")
         st.stop()
-    # 호출별 timeout 인자 대신 클라이언트 전역 타임아웃 사용(호환성 안전)
+    # 호출별 timeout 인자 대신 전역 타임아웃
     return OpenAI(api_key=ak, timeout=60)
 
 def _retry(fn, *a, **kw):
-    waits = [0.7, 1.2, 1.8]  # 총 3회, 짧게
+    waits = [0.7, 1.2, 1.8]
     err = None
     for i, w in enumerate(waits):
         try:
@@ -104,11 +107,9 @@ def _retry(fn, *a, **kw):
     raise err
 
 def _extract_from_responses(r):
-    # OpenAI 1.x responses: output_text가 가장 간단
     txt = getattr(r, "output_text", None)
     if isinstance(txt, str) and txt.strip():
         return txt.strip()
-    # 구조적 폴백
     parts = []
     for item in getattr(r, "output", []) or []:
         for ct in getattr(item, "content", []) or []:
@@ -122,7 +123,6 @@ def chat_cached(system, user, model, temperature):
     c = _client()
 
     def call_chat():
-        # 일부 SDK/배포는 chat.* 미지원 → 예외 시 responses로 폴백
         return c.chat.completions.create(
             model=model,
             temperature=temperature,
@@ -265,7 +265,6 @@ def build_kr_image_en(subject_en: str, age: str, gender: str, place: str, mood: 
 # ========================= 사이드바 옵션 =========================
 with st.sidebar:
     st.header("⚙️ 생성 설정")
-    # 세션키 직접 사용(자동 반영)
     st.selectbox("모델", ["gpt-4o-mini","gpt-4o"], index=0, key="model_text")
     temperature  = st.slider("창의성", 0.0, 1.2, 0.6, 0.1)
 
@@ -324,8 +323,12 @@ go = st.button("▶ 한 번에 생성", type="primary")
 
 # ========================= LLM 스키마 요약 =========================
 def schema_for_llm(blog_min_chars:int):
-    return fr'''{{
-  "demographics": {{"age_group": "{final_age}","gender": "{final_gender}"}}}
+    # f-string 중괄호 안전 처리 (불필요한 raw 제거)
+    return f'''{{
+  "demographics": {{
+    "age_group": "{final_age}",
+    "gender": "{final_gender}"
+  }}
 }}'''
 
 # ========================= 유튜브 생성(한국어 고정) =========================
@@ -470,7 +473,6 @@ def build_blog_md(blog: dict) -> str:
 # ========================= 실행(진행률 텍스트 호환) =========================
 if go:
     try:
-        # 옵션 공유
         st.session_state["people_taste"] = people_taste
 
         do_yt   = target in ["유튜브 + 블로그","유튜브만"]
@@ -558,7 +560,6 @@ if go:
             st.markdown("**② 본문 (강화 · 이미지 앵커 포함)**")
             copy_block("블로그 본문 복사", blog.get("body",""), 420, True)
 
-            # 본문 + 해시태그 한 번에
             st.markdown("**②-β 본문 + 해시태그 (한 번에 복사)**")
             combined_text = build_blog_body_with_tags(blog, tag_join_style)
             copy_block("블로그 본문+해시태그", combined_text, 460, True)
