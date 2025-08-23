@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-# app.py — 블로그·유튜브 통합 생성기 (세션분리·최종 안정화본)
-# - API 키 자동 점검(모델 리스트로 즉시 검증)
-# - 무한로딩 방지: 하드 타임아웃 + responses 폴백
-# - 세션 KeyError 방지: 쓰레드 내 session_state 직접 접근 금지(모델 값 인자 전달)
+# 블로그·유튜브 통합 생성기 — 최종 안정화본 (2025-08)
+# - API 키 자동 점검(모델 리스트 호출)
+# - LLM 하드 타임아웃 + responses 폴백
+# - 세션 KeyError 방지: 모델값 인자 전달
+# - 중첩 스레드 제거 → 순차 실행 (워치독만 사용)
 # - 진행 로그(status) + 진행률 바
-# - schema_for_llm 중괄호 오류 수정
+# - schema 중괄호 f-string 오류 수정
 
 import os, re, json, time, uuid, inspect, html
 from datetime import datetime, timezone, timedelta
@@ -16,19 +17,17 @@ from openai import OpenAI
 # ========================= 기본 설정 =========================
 KST = timezone(timedelta(hours=9))
 SAFE_BOOT    = True
-MAX_WORKERS  = 2
 CTA          = "강쌤철물 집수리 관악점에 지금 바로 문의주세요. 상담문의: 010-2276-8163"
 
 st.set_page_config(page_title="블로그·유튜브 통합 생성기", page_icon="⚡", layout="wide")
 st.title("⚡ 블로그·유튜브 통합 생성기 (최종 안정화본)")
 st.caption(f"KST {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} · 한국어 고정 · EN 이미지 프롬프트 · 무한로딩 방지")
 
-# 세션 기본값 (UI용)
+# 세션 기본값
 st.session_state.setdefault("model_text", "gpt-4o-mini")
 st.session_state.setdefault("_humanize_calls", 0)
 st.session_state.setdefault("_humanize_used",  0.0)
 st.session_state.setdefault("people_taste", True)
-
 HUMANIZE_BUDGET_CALLS = 8
 HUMANIZE_BUDGET_SECS  = 20.0
 
@@ -45,19 +44,19 @@ def _load_api_key():
 def _check_api_health():
     api_key = _load_api_key()
     if not api_key:
-        st.error("❌ OpenAI API 키가 설정되지 않았습니다. Streamlit Secrets 또는 환경변수를 확인해 주세요.")
+        st.error("❌ OpenAI API 키가 없습니다. Streamlit Secrets 또는 환경변수에 등록해 주세요.")
         st.stop()
     try:
         client = OpenAI(api_key=api_key, timeout=30)
-        _ = client.models.list()  # 헬스체크
+        _ = client.models.list()   # 헬스체크
         st.success("✅ OpenAI API 연결 성공")
         return client
     except Exception as e:
-        st.error("⚠️ OpenAI API 키 연결에 실패했습니다. (키/프로젝트 권한/네트워크 점검)")
+        st.error("⚠️ OpenAI API 연결 실패 (키/프로젝트 권한/네트워크 확인)")
         st.exception(e)
         st.stop()
 
-_ = _check_api_health()  # 첫 렌더에서 상태 표시
+_ = _check_api_health()
 
 # ========================= 복사 블록 =========================
 def _copy_iframe_html(title: str, esc_text: str, height: int) -> str:
@@ -105,12 +104,11 @@ def copy_block(title: str, text: str, height: int = 160, use_button: bool = True
         st.text_area("", text or "", height=height, key=f"ta_{uuid.uuid4().hex}")
         st.caption("복사: 영역 클릭 → Ctrl+A → Ctrl+C")
 
-# ========================= OpenAI 클라이언트/LLM 헬퍼 =========================
+# ========================= OpenAI/LLM 헬퍼 =========================
 def _client():
     ak = _load_api_key()
     if not ak:
-        st.warning("🔐 OPENAI_API_KEY가 없습니다.", icon="⚠️")
-        st.stop()
+        st.warning("🔐 OPENAI_API_KEY 없음", icon="⚠️"); st.stop()
     return OpenAI(api_key=ak, timeout=60)
 
 def _extract_from_responses(r):
@@ -127,8 +125,8 @@ def _extract_from_responses(r):
 
 @st.cache_data(show_spinner=False)
 def chat_cached(system, user, model, temperature):
-    """무한대기 차단: 45초 하드 타임아웃 + responses 폴백"""
-    REQUEST_DEADLINE = 45
+    """무한대기 차단: 40초 하드 타임아웃 + responses 폴백"""
+    REQUEST_DEADLINE = 40
     c = _client()
 
     def call_chat():
@@ -136,31 +134,23 @@ def chat_cached(system, user, model, temperature):
             model=model,
             temperature=temperature,
             max_tokens=2200,
-            messages=[
-                {"role":"system","content":system},
-                {"role":"user","content":user},
-            ],
+            messages=[{"role":"system","content":system},{"role":"user","content":user}],
         ).choices[0].message.content.strip()
 
     def call_responses_fallback():
         r = c.responses.create(
             model=model,
-            input=[
-                {"role":"system","content":system},
-                {"role":"user","content":user},
-            ],
+            input=[{"role":"system","content":system},{"role":"user","content":user}],
             max_output_tokens=2200,
             temperature=temperature,
         )
         return _extract_from_responses(r)
 
     def guarded_call():
-        try:
-            return call_chat()
-        except Exception:
-            return call_responses_fallback()
+        try: return call_chat()
+        except Exception: return call_responses_fallback()
 
-    waits = [0.0, 0.8]
+    waits = [0.0, 0.8]  # 2회 시도
     start = time.time()
     for w in waits:
         if w: time.sleep(w)
@@ -173,15 +163,15 @@ def chat_cached(system, user, model, temperature):
         except (FuturesTimeout, Exception):
             continue
 
-    # 완전 실패 시 UI가 끝나도록 안전 JSON 반환
+    # 완전 실패 시 안전 JSON 반환(렌더 강제)
     return json.dumps({
         "youtube": {
             "titles": [f"임시 제목 {i}" for i in range(1,11)],
-            "description": "네트워크 지연으로 간단 요약만 표기합니다.",
-            "chapters": [{"title":"임시 챕터","script":"네트워크 지연으로 임시 스크립트입니다."}],
+            "description": "네트워크 지연으로 임시 설명입니다.",
+            "chapters": [{"title":"임시 챕터","script":"임시 스크립트입니다."}],
             "images":{"thumbnail":{"en":"Korean context thumbnail, no text overlay"},
                       "chapters":[{"index":1,"en":"support visual, no text overlay"}]},
-            "hashtags":["#임시","#생성","/"]*7
+            "hashtags":["#임시","#생성","#보류"]*7
         },
         "blog": {
             "titles": [f"임시 블로그 제목 {i}" for i in range(1,11)],
@@ -201,10 +191,8 @@ def run_step_with_deadline(fn, deadline_sec=75, *a, **kw):
 
 # ========================= 유틸/보정 =========================
 def safe_json_parse(raw, fallback):
-    try:
-        return json.loads(raw) if raw else fallback
-    except Exception:
-        return fallback
+    try: return json.loads(raw) if raw else fallback
+    except Exception: return fallback
 
 def _is_mostly_english(text: str) -> bool:
     if not text: return False
@@ -217,11 +205,8 @@ def ensure_korean_lines(lines, model):
     if not lines: return lines
     sample = " ".join(lines[:3])
     if _is_mostly_english(sample):
-        ko = chat_cached(
-            "아래 목록을 자연스러운 한국어로 번역하세요. 줄 수/순서 유지, 과장 금지.",
-            "\n".join(lines),
-            model, 0.2
-        )
+        ko = chat_cached("아래 목록을 자연스러운 한국어로 번역. 줄 수/순서 유지, 과장 금지.",
+                         "\n".join(lines), model, 0.2)
         out = [ln.strip() for ln in ko.splitlines() if ln.strip()]
         return out[:len(lines)]
     return lines
@@ -232,13 +217,11 @@ def humanize_ko(text: str, mode: str, model: str, region: str = "관악구", per
     if (st.session_state["_humanize_calls"] >= HUMANIZE_BUDGET_CALLS) or (st.session_state["_humanize_used"] >= HUMANIZE_BUDGET_SECS):
         return text
     style_sys = (
-        "당신은 한국어 글맛을 살리는 전문 편집자입니다. "
-        "문장을 자연스럽고 생생하게 다듬되 과장/광고톤은 억제하세요. "
-        "짧은/긴 문장을 섞고, 2~3문장마다 호흡을 둡니다. "
-        f"지역 맥락({region})과 현장 전문가 '{persona}' 말투를 약하게 스며들게 하세요."
+        "당신은 한국어 글맛을 살리는 편집자입니다. 과장/광고톤 억제, 2~3문장마다 호흡, "
+        f"지역({region})과 현장전문가 '{persona}'의 말투를 약하게 스며들게."
     )
     mode_line = "영업형: CTA는 마지막 1줄만." if mode=="sales" else "정보형: CTA 금지."
-    ask = f"{mode_line}\n\n[원문]\n{text}\n\n위 원문을 규칙에 맞춰 자연스럽게 다듬어 주세요."
+    ask = f"{mode_line}\n\n[원문]\n{text}\n\n원문 구조는 유지, 리듬과 어휘만 개선."
     out = chat_cached(style_sys, ask, model, 0.6)
     st.session_state["_humanize_calls"] += 1
     st.session_state["_humanize_used"]  += (time.time()-start_ts)
@@ -261,28 +244,23 @@ def detect_demo_from_topic(topic: str):
     ]
     for pat,label in age_map:
         if re.search(pat, t): age = label; break
-    if re.search(r"(남성|남자|아빠|형|삼촌|신사|남편|중년남|아재)", t):
-        gender = "남성"
-    elif re.search(r"(여성|여자|엄마|언니|이모|숙녀|아내|중년여|여성전용)", t):
-        gender = "여성"
-    else:
-        gender = "혼합"
+    if re.search(r"(남성|남자|아빠|형|삼촌|신사|남편|중년남|아재)", t): gender = "남성"
+    elif re.search(r"(여성|여자|엄마|언니|이모|숙녀|아내|중년여|여성전용)", t): gender = "여성"
+    else: gender = "혼합"
     return age, gender
 
 def build_kr_image_en(subject_en: str, age: str, gender: str, place: str, mood: str, shot: str, style: str) -> str:
-    age_en = {
-        "유아":"toddlers","아동":"children","청소년":"teenagers",
-        "20대":"people in their 20s","30대":"people in their 30s","40대":"people in their 40s",
-        "50대":"people in their 50s","60대":"people in their 60s","70대":"people in their 70s","성인":"adults"
-    }.get(age, "adults")
-    gender_en = {"남성":"Korean man","여성":"Korean woman","혼합":"Korean men and women"}.get(gender, "Korean men and women")
+    age_en = {"유아":"toddlers","아동":"children","청소년":"teenagers","20대":"people in their 20s",
+              "30대":"people in their 30s","40대":"people in their 40s","50대":"people in their 50s",
+              "60대":"people in their 60s","70대":"people in their 70s","성인":"adults"}.get(age,"adults")
+    gender_en = {"남성":"Korean man","여성":"Korean woman","혼합":"Korean men and women"}.get(gender,"Korean men and women")
     place_en = {
         "한국 가정 거실":"modern Korean home living room interior",
         "한국 아파트 단지":"Korean apartment complex outdoor area",
         "한국 동네 공원":"local Korean neighborhood park",
         "한국 병원/검진센터":"Korean medical clinic or health screening center interior",
         "한국형 주방/식탁":"modern Korean kitchen and dining table"
-    }.get(place, "modern Korean interior")
+    }.get(place,"modern Korean interior")
     shot_en  = {"클로즈업":"close-up","상반신":"medium shot","전신":"full body shot","탑뷰/테이블샷":"top view table shot"}.get(shot,"medium shot")
     mood_en  = {"따뜻한":"warm","밝은":"bright","차분한":"calm","활기찬":"energetic"}.get(mood,"warm")
     style_en = {"사진 실사":"realistic photography, high resolution","시네마틱":"cinematic photo style",
@@ -328,12 +306,13 @@ with st.sidebar:
 # ========================= 입력 폼 =========================
 st.subheader("🎯 주제 및 내용")
 c1,c2,c3,c4 = st.columns([2,1,1,1])
-with c1: topic = st.text_input("주제", value="50대 이후 조심해야 할 음식 TOP5")
+with c1: topic = st.text_input("주제", value="관악구 봉천동 성현동아 아파트")
 with c2: tone  = st.selectbox("톤/스타일", ["시니어 친화형","전문가형","친근한 설명형"], 1)
 with c3: mode_sel = st.selectbox("콘텐츠 유형", ["자동 분류","정보형(블로그 지수)","시공후기형(영업)"], 1)
 with c4: target = st.selectbox("생성 대상", ["유튜브 + 블로그","유튜브만","블로그만"], 0)
 
-def classify(txt): return "sales" if any(k in txt for k in ["시공","교체","설치","수리","누수","보수","후기","현장","관악","강쌤철물"]) else "info"
+def classify(txt):
+    return "sales" if any(k in txt for k in ["시공","교체","설치","수리","누수","보수","후기","현장","관악","강쌤철물"]) else "info"
 def ensure_mode():
     if mode_sel=="정보형(블로그 지수)": return "info"
     if mode_sel=="시공후기형(영업)":   return "sales"
@@ -344,15 +323,14 @@ auto_age, auto_gender = detect_demo_from_topic(topic)
 final_age    = auto_age    if img_age    == "자동" else img_age
 final_gender = auto_gender if img_gender == "자동" else img_gender
 
-if SAFE_BOOT:
-    st.caption("옵션 확인 후 아래 버튼으로 실행하세요.")
+if SAFE_BOOT: st.caption("옵션 확인 후 아래 버튼으로 실행하세요.")
 go = st.button("▶ 한 번에 생성", type="primary")
 
-# 쓰레드에 넘길 모델 값을 UI 밖에서 고정 (세션 직접접근 금지)
+# 쓰레드 밖에서 모델값 고정(세션 직접 접근 금지)
 MODEL = st.session_state.get("model_text", "gpt-4o-mini")
 
 # ========================= LLM 스키마 =========================
-def schema_for_llm(blog_min_chars:int):
+def schema_for_llm(_:int):
     return f'''{{
   "demographics": {{
     "age_group": "{final_age}",
@@ -360,7 +338,7 @@ def schema_for_llm(blog_min_chars:int):
   }}
 }}'''
 
-# ========================= 생성 함수(모델 인자 사용) =========================
+# ========================= 생성 함수 =========================
 def gen_youtube(topic, tone, n, mode, model):
     sys = (
       "[persona / voice rules]\n"
@@ -373,10 +351,8 @@ def gen_youtube(topic, tone, n, mode, model):
       "SEO titles (10, Korean) should include the main keyword early and avoid clickbait.\n"
       "Provide exactly N chapters (3~5 sentences each). All visuals in Korean context."
     )
-    user = (
-      f"[topic] {topic}\n[tone] {tone}\n[mode] {'info' if mode=='info' else 'sales'}\n[N] {n}\n"
-      f"[demographics] age={final_age}, gender={final_gender}\n[schema]\n{schema_for_llm(0)}"
-    )
+    user = (f"[topic] {topic}\n[tone] {tone}\n[mode] {'info' if mode=='info' else 'sales'}\n[N] {n}\n"
+            f"[demographics] age={final_age}, gender={final_gender}\n[schema]\n{schema_for_llm(0)}")
     raw = chat_cached(sys, user, model, temperature)
     data = safe_json_parse(raw, {})
     yt = data.get("youtube") or {
@@ -423,10 +399,8 @@ def gen_blog(topic, tone, mode, min_chars, img_count, model):
       "Info mode forbids CTA. Sales mode allows ONE CTA at the very last line.\n"
       "Provide 10 SEO titles, 20 tags, and EN image prompts with NO TEXT OVERLAY."
     )
-    user = (
-      f"[topic] {topic}\n[tone] {tone}\n[mode] {'info' if mode=='info' else 'sales'}\n"
-      f"[demographics] age={final_age}, gender={final_gender}\n[schema]\n{schema_for_llm(min_chars)}"
-    )
+    user = (f"[topic] {topic}\n[tone] {tone}\n[mode] {'info' if mode=='info' else 'sales'}\n"
+            f"[demographics] age={final_age}, gender={final_gender}\n[schema]\n{schema_for_llm(min_chars)}")
     raw = chat_cached(sys, user, model, temperature)
     data = safe_json_parse(raw, {})
     blog = data.get("blog") or {
@@ -468,17 +442,17 @@ def gen_blog(topic, tone, mode, min_chars, img_count, model):
 
 # ========================= 태그/내보내기 =========================
 def _join_tags(tags, style: str) -> str:
-    tags = tags or []
     return "\n".join(tags) if style == "줄바꿈 여러 줄" else " ".join(tags)
 
 def build_blog_body_with_tags(blog: dict, style: str) -> str:
     body = (blog.get("body") or "").rstrip()
-    tag_str = _join_tags(blog.get("tags", []), style)
-    return f"{body}\n\n{tag_str}".strip() if tag_str else body
+    tags = _join_tags(blog.get("tags", []), style)
+    return f"{body}\n\n{tags}".strip() if tags else body
 
 def build_youtube_txt(yt: dict) -> str:
     titles = "\n".join(f"{i+1}. {t}" for i,t in enumerate(yt.get('titles',[])[:10]))
-    chapters = "\n\n".join(f"[챕터 {i+1}] {c.get('title','')}\n{c.get('script','')}" for i,c in enumerate(yt.get('chapters',[])))
+    chapters = "\n\n".join(f"[챕터 {i+1}] {c.get('title','')}\n{c.get('script','')}"
+                           for i,c in enumerate(yt.get('chapters',[])))
     desc = yt.get('description','').strip()
     tags = " ".join(yt.get('hashtags',[]))
     return f"# YouTube Package\n\n## Titles\n{titles}\n\n## Description\n{desc}\n\n## Chapters\n{chapters}\n\n## Hashtags\n{tags}\n"
@@ -489,7 +463,7 @@ def build_blog_md(blog: dict) -> str:
     tags = " ".join(blog.get('tags',[]))
     return f"# Blog Package\n\n## Titles\n{titles}\n\n## Body\n{body}\n\n## Tags\n{tags}\n"
 
-# ========================= 실행(진행 로그 + 진행률) =========================
+# ========================= 실행 (순차 + 워치독) =========================
 if go:
     try:
         st.session_state["people_taste"] = people_taste
@@ -497,37 +471,31 @@ if go:
         do_yt   = target in ["유튜브 + 블로그","유튜브만"]
         do_blog = target in ["유튜브 + 블로그","블로그만"]
 
-        prog = st.progress(0)
-        prog_text = st.empty()
-        status = st.status("실행 로그", expanded=False)
-        status.write("초기화…")
+        prog = st.progress(0); prog_text = st.empty()
+        status = st.status("실행 로그", expanded=False); status.write("초기화…")
+        results = {}
 
-        results={}
-        with ThreadPoolExecutor(max_workers=1 if safe_mode else MAX_WORKERS) as ex:
-            futs=[]
-            if do_yt:
-                prog.progress(15); prog_text.write("유튜브 패키지 생성 중…")
-                status.write("유튜브 프롬프트 전송…")
-                futs.append(("yt", ex.submit(run_step_with_deadline, gen_youtube, 75,
-                                             topic, tone, target_chapter, mode, MODEL)))
-            if do_blog:
-                prog.progress(45 if do_yt else 15); prog_text.write("블로그 패키지 생성 중…")
-                status.write("블로그 프롬프트 전송…")
-                futs.append(("blog", ex.submit(run_step_with_deadline, gen_blog, 90,
-                                               topic, tone, mode, blog_min, blog_imgs, MODEL)))
+        # 유튜브
+        if do_yt:
+            prog.progress(15); prog_text.write("유튜브 패키지 생성 중…")
+            status.write("유튜브 프롬프트 전송…")
+            results["yt"] = run_step_with_deadline(gen_youtube, 75, topic, tone, target_chapter, mode, MODEL)
+            status.write("유튜브 패키지 수신 완료")
 
-            for name,f in futs:
-                status.write(f"{name} 수신 대기…")
-                results[name]=f.result()
+        # 블로그
+        if do_blog:
+            prog.progress(45 if do_yt else 15); prog_text.write("블로그 패키지 생성 중…")
+            status.write("블로그 프롬프트 전송…")
+            results["blog"] = run_step_with_deadline(gen_blog, 90, topic, tone, mode, blog_min, blog_imgs, MODEL)
+            status.write("블로그 패키지 수신 완료")
 
-        prog.progress(85); prog_text.write("후처리 및 렌더링…")
-        status.write("후처리…")
+        # 렌더링
+        prog.progress(85); prog_text.write("후처리 및 렌더링…"); status.write("후처리…")
 
         # ===== 유튜브 출력 =====
         if do_yt:
             st.markdown("## 📺 유튜브 패키지")
-            yt=results.get("yt",{})
-
+            yt = results.get("yt", {})
             st.markdown("**① 영상 제목(SEO 10)**")
             titles=[f"{i+1}. {t}" for i,t in enumerate(yt.get("titles",[])[:10])]
             copy_block("영상 제목 복사", "\n".join(titles), 160, True)
@@ -540,12 +508,6 @@ if go:
             st.markdown("**③ 브루 자막 — 전체 일괄 복사 (Vrew)**")
             copy_block("브루 자막 — 전체 일괄", full_vrew_script, 220, True)
 
-            if show_chapter_blocks:
-                exp = st.expander("챕터별 자막 복사 (펼쳐서 보기)", expanded=False)
-                with exp:
-                    for i,c in enumerate(chapters,1):
-                        copy_block(f"[챕터 {i}] {c.get('title',f'챕터 {i}')}", c.get("script",""), 140, True)
-
             st.markdown("**④ 이미지 프롬프트 (EN only, no text overlay)**")
             if include_thumb:
                 copy_block("[썸네일] EN",
@@ -553,19 +515,6 @@ if go:
                                f"YouTube thumbnail for topic: {topic}. Korean home context, healthy living.",
                                final_age, final_gender, img_place, img_mood, img_shot, img_style),
                            110, True)
-
-            if show_img_blocks:
-                ips=(yt.get("images",{}) or {}).get("chapters",[])
-                if len(ips)<len(chapters):
-                    for i in range(len(ips),len(chapters)):
-                        ips.append({"index":i+1,"en":"support visual, no text overlay"})
-                expi=st.expander("챕터별 이미지 프롬프트 (펼쳐서 보기)", expanded=False)
-                with expi:
-                    for i,p in enumerate(ips[:target_chapter],1):
-                        base = p.get("en","") or f"support visual for chapter {i} about '{chapters[i-1].get('title','')}'"
-                        copy_block(f"[챕터 {i}] EN",
-                                   build_kr_image_en(base, final_age, final_gender, img_place, img_mood, img_shot, img_style),
-                                   110, True)
 
             st.markdown("**⑤ 해시태그(20)**")
             copy_block("해시태그 복사", " ".join(yt.get("hashtags",[])), 90, True)
@@ -578,8 +527,7 @@ if go:
         # ===== 블로그 출력 =====
         if do_blog:
             st.markdown("---"); st.markdown("## 📝 블로그 패키지")
-            blog=results.get("blog",{})
-
+            blog = results.get("blog", {})
             st.markdown("**① 블로그 제목(SEO 10)**")
             bts=[f"{i+1}. {t}" for i,t in enumerate(blog.get("titles",[])[:10])]
             copy_block("블로그 제목 복사", "\n".join(bts), 160, True)
@@ -592,7 +540,7 @@ if go:
             copy_block("블로그 본문+해시태그", combined_text, 460, True)
 
             st.markdown("**③ 이미지 프롬프트 (EN only, no text overlay)**")
-            if show_img_blocks:
+            if blog.get("images"):
                 expb = st.expander("블로그 이미지 프롬프트 (펼쳐서 보기)", expanded=False)
                 with expb:
                     for p in blog.get("images",[]):
@@ -617,4 +565,4 @@ if go:
         st.exception(e)
 
 st.markdown("---")
-st.caption("세션 분리(모델 인자 전달) · 무한로딩 방지 · API 키 자동 점검 · 사람맛 보정 예산 · EN 이미지 프롬프트 · 본문+해시태그 일괄복사")
+st.caption("무한로딩 방지(하드 타임아웃/폴백) · 세션 접근 안전화 · 순차 실행 · API 키 자동 점검 · 본문+해시태그 일괄복사")
