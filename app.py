@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-# app.py — 블로그·유튜브 통합 생성기 (완전체·리팩토링 안정화본)
-# - 세션상태 초기화(KeyError 방지)
-# - OpenAI 호출 호환(chat → responses 폴백)
-# - 진행률 텍스트 호환(Streamlit 일부 버전)
-# - 복사 컴포넌트 안정성
-# - 타임아웃/워치독 강화
-# - schema_for_llm f-string 중괄호 오류 수정
+# app.py — 블로그·유튜브 통합 생성기 (최종 안정화본)
+# - API 키 자동 점검 (모델 리스트로 즉시 검증)
+# - 무한로딩 방지: 하드 타임아웃 + 폴백
+# - 세션상태 기본값/KeyError 방지
+# - chat.completions → responses.create 자동 폴백
+# - 진행 로그(status) + 진행률 바 텍스트 호환
+# - schema_for_llm f-string 중괄호 수정
 
 import os, re, json, time, uuid, inspect, html
 from datetime import datetime, timezone, timedelta
@@ -14,31 +14,53 @@ import streamlit as st
 from streamlit.components.v1 import html as comp_html
 from openai import OpenAI
 
-# ========================= 기본 설정 =========================
+# ========================= 기본 설정 및 세션 기본값 =========================
 KST = timezone(timedelta(hours=9))
 SAFE_BOOT    = True
 MAX_WORKERS  = 2
 CTA          = "강쌤철물 집수리 관악점에 지금 바로 문의주세요. 상담문의: 010-2276-8163"
 
-# 세션 기본값 — KeyError 방지
+st.set_page_config(page_title="블로그·유튜브 통합 생성기", page_icon="⚡", layout="wide")
+st.title("⚡ 블로그·유튜브 통합 생성기 (최종 안정화본)")
+st.caption(f"KST {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} · 한국어 고정 · EN 이미지 프롬프트 · 무한로딩 방지")
+
+# 세션 키 기본값
 st.session_state.setdefault("model_text", "gpt-4o-mini")
 st.session_state.setdefault("_humanize_calls", 0)
 st.session_state.setdefault("_humanize_used",  0.0)
 st.session_state.setdefault("people_taste", True)
 
-# 사람맛 보정 예산
 HUMANIZE_BUDGET_CALLS = 8
 HUMANIZE_BUDGET_SECS  = 20.0
-
-st.set_page_config(page_title="블로그·유튜브 통합 생성기", page_icon="⚡", layout="wide")
-st.title("⚡ 블로그·유튜브 통합 생성기 (완전체)")
-st.caption(f"KST {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} · 한국어 고정 · 이미지 EN 전용(no text) · 안정 모드 · 무한로딩 방지")
 
 # components.html key 지원 확인
 try:
     HTML_SUPPORTS_KEY = 'key' in inspect.signature(comp_html).parameters
 except Exception:
     HTML_SUPPORTS_KEY = False
+
+# ========================= API 키 자동 점검 =========================
+def _load_api_key():
+    return os.getenv("OPENAI_API_KEY", st.secrets.get("OPENAI_API_KEY", ""))
+
+def _check_api_health():
+    api_key = _load_api_key()
+    if not api_key:
+        st.error("❌ OpenAI API 키가 설정되지 않았습니다. Streamlit Secrets 또는 환경변수를 확인해 주세요.")
+        st.stop()
+    try:
+        client = OpenAI(api_key=api_key, timeout=30)
+        # 가벼운 헬스체크: 모델 목록 호출
+        _ = client.models.list()
+        st.success("✅ OpenAI API 연결 성공")
+        return client
+    except Exception as e:
+        st.error("⚠️ OpenAI API 키 연결에 실패했습니다. (키/프로젝트 권한/네트워크 점검)")
+        st.exception(e)
+        st.stop()
+
+# 첫 렌더에서 상태 노출 (성공/실패)
+_client_for_health = _check_api_health()
 
 # ========================= 복사 블록(iframe) =========================
 def _copy_iframe_html(title: str, esc_text: str, height: int) -> str:
@@ -86,25 +108,13 @@ def copy_block(title: str, text: str, height: int = 160, use_button: bool = True
         st.text_area("", text or "", height=height, key=f"ta_{uuid.uuid4().hex}")
         st.caption("복사: 영역 클릭 → Ctrl+A → Ctrl+C")
 
-# ========================= OpenAI + 재시도/타임아웃 =========================
+# ========================= OpenAI 클라이언트/재시도/타임아웃 =========================
 def _client():
-    ak = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+    ak = _load_api_key()
     if not ak:
         st.warning("🔐 OPENAI_API_KEY가 없습니다. Streamlit Secrets 또는 환경변수에 설정해주세요.", icon="⚠️")
         st.stop()
-    # 호출별 timeout 인자 대신 전역 타임아웃
     return OpenAI(api_key=ak, timeout=60)
-
-def _retry(fn, *a, **kw):
-    waits = [0.7, 1.2, 1.8]
-    err = None
-    for i, w in enumerate(waits):
-        try:
-            return fn(*a, **kw)
-        except Exception as e:
-            err = e
-            if i < len(waits)-1: time.sleep(w)
-    raise err
 
 def _extract_from_responses(r):
     txt = getattr(r, "output_text", None)
@@ -118,8 +128,10 @@ def _extract_from_responses(r):
                 if t: parts.append(t)
     return "\n".join(parts).strip()
 
+# 하드 타임아웃 + 폴백 + 가벼운 재시도
 @st.cache_data(show_spinner=False)
 def chat_cached(system, user, model, temperature):
+    REQUEST_DEADLINE = 45  # 초: 무한대기 차단 핵심
     c = _client()
 
     def call_chat():
@@ -131,7 +143,7 @@ def chat_cached(system, user, model, temperature):
                 {"role":"system","content":system},
                 {"role":"user","content":user},
             ],
-        )
+        ).choices[0].message.content.strip()
 
     def call_responses_fallback():
         r = c.responses.create(
@@ -145,16 +157,52 @@ def chat_cached(system, user, model, temperature):
         )
         return _extract_from_responses(r)
 
-    def _call():
+    def guarded_call():
         try:
-            resp = call_chat()
-            return resp.choices[0].message.content.strip()
+            return call_chat()
         except Exception:
             return call_responses_fallback()
 
-    return _retry(_call)
+    waits = [0.0, 0.8]  # 2회 시도
+    start = time.time()
+    last_err = None
+    for w in waits:
+        if w: time.sleep(w)
+        remain = REQUEST_DEADLINE - (time.time() - start)
+        if remain <= 0:
+            break
+        try:
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(guarded_call)
+                return fut.result(timeout=max(5, remain))
+        except FuturesTimeout as e:
+            last_err = e
+            continue
+        except Exception as e:
+            last_err = e
+            continue
 
-# ========================= 워치독 =========================
+    # 완전 실패 시 UI가 끝나도록 안전 JSON 반환
+    return json.dumps({
+        "youtube": {
+            "titles": ["임시 제목 1","임시 제목 2","임시 제목 3","임시 제목 4","임시 제목 5",
+                       "임시 제목 6","임시 제목 7","임시 제목 8","임시 제목 9","임시 제목 10"],
+            "description": "네트워크 지연으로 간단 요약만 표기합니다.",
+            "chapters": [{"title":"임시 챕터","script":"네트워크 지연으로 임시 스크립트입니다."}],
+            "images":{"thumbnail":{"en":"Korean context thumbnail, no text overlay"},
+                      "chapters":[{"index":1,"en":"support visual, no text overlay"}]},
+            "hashtags":["#임시","#생성","/"]*7
+        },
+        "blog": {
+            "titles": ["임시 블로그 제목 1","임시 블로그 제목 2","임시 블로그 제목 3","임시 블로그 제목 4","임시 블로그 제목 5",
+                       "임시 블로그 제목 6","임시 블로그 제목 7","임시 블로그 제목 8","임시 블로그 제목 9","임시 블로그 제목 10"],
+            "body": "네트워크 지연으로 임시 본문입니다.\n\n[이미지:대표]",
+            "images":[{"label":"대표","en":"Korean context, no text overlay"}],
+            "tags":["#임시","#블로그","#태그"]*7
+        }
+    }, ensure_ascii=False)
+
+# ========================= 워치독 유틸 =========================
 def run_step_with_deadline(fn, deadline_sec=75, *a, **kw):
     with ThreadPoolExecutor(max_workers=1) as _ex:
         fut = _ex.submit(fn, *a, **kw)
@@ -163,14 +211,13 @@ def run_step_with_deadline(fn, deadline_sec=75, *a, **kw):
         except FuturesTimeout:
             raise TimeoutError(f"Step exceeded {deadline_sec}s")
 
-# ========================= JSON 세이프 파서 =========================
+# ========================= 파서/언어 보정 =========================
 def safe_json_parse(raw, fallback):
     try:
         return json.loads(raw) if raw else fallback
     except Exception:
         return fallback
 
-# ========================= 한국어 보정 유틸 =========================
 def _is_mostly_english(text: str) -> bool:
     if not text: return False
     letters = sum(ch.isalpha() for ch in text)
@@ -214,7 +261,7 @@ def humanize_ko(text: str, mode: str, region: str = "관악구", persona: str = 
     st.session_state["_humanize_used"]  += (time.time()-start_ts)
     return out
 
-# ========================= 자동 타깃 추론 =========================
+# ========================= 타깃 추론/이미지 프롬프트 =========================
 def detect_demo_from_topic(topic: str):
     t = (topic or "").lower()
     age = "성인"
@@ -239,7 +286,6 @@ def detect_demo_from_topic(topic: str):
         gender = "혼합"
     return age, gender
 
-# ========================= 이미지 프롬프트 빌더(EN only) =========================
 def build_kr_image_en(subject_en: str, age: str, gender: str, place: str, mood: str, shot: str, style: str) -> str:
     age_en = {
         "유아":"toddlers","아동":"children","청소년":"teenagers",
@@ -321,9 +367,8 @@ if SAFE_BOOT:
     st.caption("옵션 확인 후 아래 버튼으로 실행하세요.")
 go = st.button("▶ 한 번에 생성", type="primary")
 
-# ========================= LLM 스키마 요약 =========================
+# ========================= LLM 스키마(중괄호 수정본) =========================
 def schema_for_llm(blog_min_chars:int):
-    # f-string 중괄호 안전 처리 (불필요한 raw 제거)
     return f'''{{
   "demographics": {{
     "age_group": "{final_age}",
@@ -331,7 +376,7 @@ def schema_for_llm(blog_min_chars:int):
   }}
 }}'''
 
-# ========================= 유튜브 생성(한국어 고정) =========================
+# ========================= 생성 함수 =========================
 def gen_youtube(topic, tone, n, mode):
     sys = (
       "[persona / voice rules]\n"
@@ -359,7 +404,6 @@ def gen_youtube(topic, tone, n, mode):
         "hashtags":["#건강","#관리","#생활"]*5
     }
 
-    # 한국어 보정
     yt["titles"] = ensure_korean_lines(yt.get("titles", [])[:10], st.session_state["model_text"])
     desc = yt.get("description","")
     if _is_mostly_english(desc):
@@ -383,7 +427,6 @@ def gen_youtube(topic, tone, n, mode):
             c["script"] = humanize_ko(c.get("script",""), mode)
     return yt
 
-# ========================= 블로그 생성 =========================
 def gen_blog(topic, tone, mode, min_chars, img_count):
     sys = (
       "[persona / voice rules]\n"
@@ -409,7 +452,6 @@ def gen_blog(topic, tone, mode, min_chars, img_count):
         "tags":["#건강","#식단","#생활","#관리"]*5
     }
 
-    # 최소 길이 보강 + 워치독
     if len(blog.get("body","")) < min_chars:
         def _expand():
             return chat_cached(
@@ -423,7 +465,6 @@ def gen_blog(topic, tone, mode, min_chars, img_count):
         except Exception:
             pass
 
-    # CTA 처리
     if mode=="sales":
         if CTA not in blog.get("body",""):
             blog["body"] = blog.get("body","").rstrip() + f"\n\n{CTA}"
@@ -433,7 +474,6 @@ def gen_blog(topic, tone, mode, min_chars, img_count):
     if st.session_state.get("people_taste", True):
         blog["body"] = humanize_ko(blog.get("body",""), mode)
 
-    # 이미지 프롬프트 개수 정리
     prompts = blog.get("images", [])[:img_count]
     while len(prompts) < img_count:
         i=len(prompts)
@@ -470,7 +510,7 @@ def build_blog_md(blog: dict) -> str:
     tags = " ".join(blog.get('tags',[]))
     return f"# Blog Package\n\n## Titles\n{titles}\n\n## Body\n{body}\n\n## Tags\n{tags}\n"
 
-# ========================= 실행(진행률 텍스트 호환) =========================
+# ========================= 실행(진행 로그 + 진행률) =========================
 if go:
     try:
         st.session_state["people_taste"] = people_taste
@@ -480,21 +520,27 @@ if go:
 
         prog = st.progress(0)
         prog_text = st.empty()
-        prog_text.write("준비 중…")
-        results={}
+        status = st.status("실행 로그", expanded=False)
+        status.write("초기화…")
 
+        results={}
         with ThreadPoolExecutor(max_workers=1 if safe_mode else MAX_WORKERS) as ex:
             futs=[]
             if do_yt:
                 prog.progress(15); prog_text.write("유튜브 패키지 생성 중…")
+                status.write("유튜브 프롬프트 전송…")
                 futs.append(("yt", ex.submit(run_step_with_deadline, gen_youtube, 75, topic, tone, target_chapter, mode)))
             if do_blog:
                 prog.progress(45 if do_yt else 15); prog_text.write("블로그 패키지 생성 중…")
+                status.write("블로그 프롬프트 전송…")
                 futs.append(("blog", ex.submit(run_step_with_deadline, gen_blog, 90, topic, tone, mode, blog_min, blog_imgs)))
+
             for name,f in futs:
+                status.write(f"{name} 수신 대기…")
                 results[name]=f.result()
 
         prog.progress(85); prog_text.write("후처리 및 렌더링…")
+        status.write("후처리…")
 
         # ===== 유튜브 출력 =====
         if do_yt:
@@ -583,10 +629,11 @@ if go:
                                key=f"dl_blog_{uuid.uuid4().hex}")
 
         prog.progress(100); prog_text.write("완료")
+        status.update(label="완료", state="complete")
 
     except Exception as e:
         st.error("⚠️ 실행 중 오류가 발생했습니다. 아래 로그를 확인해주세요.")
         st.exception(e)
 
 st.markdown("---")
-st.caption("무한로딩 방지(타임아웃/워치독/폴백) · 안정 모드 · 사람맛 강화 예산 · EN 이미지 프롬프트 · 본문+해시태그 일괄복사")
+st.caption("무한로딩 방지(LLM 하드 타임아웃/폴백) · API 키 자동 점검 · 사람맛 보정 예산 · EN 이미지 프롬프트 · 본문+해시태그 일괄복사")
