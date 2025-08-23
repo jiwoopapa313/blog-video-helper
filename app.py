@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# 블로그·유튜브 통합 생성기 — 최종 안정화본 (세션오류/무한로딩 패치 완료)
+# 블로그·유튜브 통합 생성기 — 최적화 안정화본 (타임아웃 폴백 / 세션안전 / 순차실행)
 
 import os, re, json, time, uuid, inspect, html
 from datetime import datetime, timezone, timedelta
@@ -14,17 +14,17 @@ SAFE_BOOT    = True
 CTA          = "강쌤철물 집수리 관악점에 지금 바로 문의주세요. 상담문의: 010-2276-8163"
 
 st.set_page_config(page_title="블로그·유튜브 통합 생성기", page_icon="⚡", layout="wide")
-st.title("⚡ 블로그·유튜브 통합 생성기 (최종 안정화본)")
+st.title("⚡ 블로그·유튜브 통합 생성기 (최적화 안정화본)")
 st.caption(f"KST {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} · 한국어 고정 · EN 이미지 프롬프트 · 무한로딩 방지")
 
-# 세션 기본값(읽기 안전 위해 기본값을 꼭 세팅)
+# 세션 기본값
 st.session_state.setdefault("model_text", "gpt-4o-mini")
 st.session_state.setdefault("_humanize_calls", 0)
 st.session_state.setdefault("_humanize_used",  0.0)
 st.session_state.setdefault("people_taste", True)
 
-HUMANIZE_BUDGET_CALLS = 8
-HUMANIZE_BUDGET_SECS  = 20.0
+HUMANIZE_BUDGET_CALLS = 6          # 보정 호출수/초 살짝 낮춤
+HUMANIZE_BUDGET_SECS  = 12.0
 
 # components.html key 지원 확인
 try:
@@ -43,7 +43,7 @@ def _check_api_health():
         st.stop()
     try:
         client = OpenAI(api_key=api_key, timeout=30)
-        _ = client.models.list()   # 헬스체크
+        _ = client.models.list()
         st.success("✅ OpenAI API 연결 성공")
         return client
     except Exception as e:
@@ -61,8 +61,7 @@ def _copy_iframe_html(title: str, esc_text: str, height: int) -> str:
 body{{margin:0;font-family:system-ui,-apple-system,'Noto Sans KR',Arial}}
 .wrap{{border:1px solid #e5e7eb;border-radius:10px;padding:10px}}
 .ttl{{font-weight:600;margin-bottom:6px}}
-textarea{{width:100%;height:{height}px;border:1px solid #d1d5db;border-radius:8px;padding:8px;
-         white-space:pre-wrap;box-sizing:border-box;font-family:ui-monospace,Menlo,Consolas}}
+textarea{{width:100%;height:{height}px;border:1px solid #d1d5db;border-radius:8px;padding:8px;white-space:pre-wrap;box-sizing:border-box;font-family:ui-monospace,Menlo,Consolas}}
 .row{{display:flex;gap:8px;align-items:center;margin-top:8px}}
 .btn{{padding:6px 10px;border-radius:8px;border:1px solid #d1d5db;cursor:pointer;background:#fff}}
 small{{color:#6b7280}}
@@ -99,7 +98,7 @@ def copy_block(title: str, text: str, height: int = 160, use_button: bool = True
         st.text_area("", text or "", height=height, key=f"ta_{uuid.uuid4().hex}")
         st.caption("복사: 영역 클릭 → Ctrl+A → Ctrl+C")
 
-# ========================= OpenAI/LLM 헬퍼 =========================
+# ========================= OpenAI/LLM =========================
 def _client():
     ak = _load_api_key()
     if not ak:
@@ -120,15 +119,15 @@ def _extract_from_responses(r):
 
 @st.cache_data(show_spinner=False)
 def chat_cached(system, user, model, temperature):
-    """무한대기 차단: 40초 하드 타임아웃 + responses 폴백"""
-    REQUEST_DEADLINE = 40
+    """무한대기 차단: 28초 하드 타임아웃 + responses 폴백"""
+    REQUEST_DEADLINE = 28
     c = _client()
 
     def call_chat():
         return c.chat.completions.create(
             model=model,
             temperature=temperature,
-            max_tokens=2200,
+            max_tokens=2000,   # 살짝 줄여 응답가속
             messages=[{"role":"system","content":system},{"role":"user","content":user}],
         ).choices[0].message.content.strip()
 
@@ -136,7 +135,7 @@ def chat_cached(system, user, model, temperature):
         r = c.responses.create(
             model=model,
             input=[{"role":"system","content":system},{"role":"user","content":user}],
-            max_output_tokens=2200,
+            max_output_tokens=2000,
             temperature=temperature,
         )
         return _extract_from_responses(r)
@@ -145,7 +144,7 @@ def chat_cached(system, user, model, temperature):
         try: return call_chat()
         except Exception: return call_responses_fallback()
 
-    waits = [0.0, 0.8]  # 2회 시도
+    waits = [0.0, 0.8]
     start = time.time()
     for w in waits:
         if w: time.sleep(w)
@@ -158,7 +157,7 @@ def chat_cached(system, user, model, temperature):
         except (FuturesTimeout, Exception):
             continue
 
-    # 완전 실패 시 안전 JSON 반환(렌더 강제)
+    # 완전 실패 시 안전 JSON 반환
     return json.dumps({
         "youtube": {
             "titles": [f"임시 제목 {i}" for i in range(1,11)],
@@ -176,7 +175,8 @@ def chat_cached(system, user, model, temperature):
         }
     }, ensure_ascii=False)
 
-def run_step_with_deadline(fn, deadline_sec=75, *a, **kw):
+def run_step_with_deadline(fn, deadline_sec=60, *a, **kw):
+    """단일 워치독. 초과시 TimeoutError"""
     with ThreadPoolExecutor(max_workers=1) as _ex:
         fut = _ex.submit(fn, *a, **kw)
         try:
@@ -208,33 +208,24 @@ def ensure_korean_lines(lines, model):
 
 def humanize_ko(text: str, mode: str, model: str, region: str = "관악구", persona: str = "강쌤") -> str:
     """세션 안전 접근(.get) + 예외 없는 업데이트"""
-    if not text:
-        return text
-
-    # 안전 읽기 (스레드에서도 KeyError 방지)
+    if not text: return text
     calls = st.session_state.get("_humanize_calls", 0)
     used  = st.session_state.get("_humanize_used", 0.0)
-
     start_ts = time.time()
     if (calls >= HUMANIZE_BUDGET_CALLS) or (used >= HUMANIZE_BUDGET_SECS):
         return text
-
     style_sys = (
         "당신은 한국어 글맛을 살리는 편집자입니다. 과장/광고톤 억제, 2~3문장마다 호흡, "
         f"지역({region})과 현장전문가 '{persona}'의 말투를 약하게 스며들게."
     )
     mode_line = "영업형: CTA는 마지막 1줄만." if mode == "sales" else "정보형: CTA 금지."
     ask = f"{mode_line}\n\n[원문]\n{text}\n\n원문 구조는 유지, 리듬과 어휘만 개선."
-
-    out = chat_cached(style_sys, ask, model, 0.6)
-
-    # 안전 업데이트
+    out = chat_cached(style_sys, ask, model, 0.5)
     try:
         st.session_state["_humanize_calls"] = calls + 1
         st.session_state["_humanize_used"]  = used + (time.time() - start_ts)
     except Exception:
         pass
-
     return out
 
 # ========================= 타깃/이미지 프롬프트 =========================
@@ -313,7 +304,7 @@ with st.sidebar:
     if st.checkbox("강제 재생성(캐시 무시)", value=False):
         st.cache_data.clear()
 
-# ========================= 입력 폼 =========================
+# ========================= 입력 =========================
 st.subheader("🎯 주제 및 내용")
 c1,c2,c3,c4 = st.columns([2,1,1,1])
 with c1: topic = st.text_input("주제", value="50대 이후 조심해야 할 음식 TOP5")
@@ -336,10 +327,9 @@ final_gender = auto_gender if img_gender == "자동" else img_gender
 if SAFE_BOOT: st.caption("옵션 확인 후 아래 버튼으로 실행하세요.")
 go = st.button("▶ 한 번에 생성", type="primary")
 
-# 쓰레드 밖에서 모델값 고정(세션 직접 접근 금지)
 MODEL = st.session_state.get("model_text", "gpt-4o-mini")
 
-# ========================= LLM 스키마 =========================
+# ========================= LLM 스키마(간단화) =========================
 def schema_for_llm(_:int):
     return f'''{{
   "demographics": {{
@@ -347,6 +337,26 @@ def schema_for_llm(_:int):
     "gender": "{final_gender}"
   }}
 }}'''
+
+# ========================= 빠른 폴백(타임아웃 시 사용) =========================
+def quick_blog_fallback(topic:str, min_chars:int, img_count:int, mode:str):
+    body = (
+        f"## {topic}\n\n"
+        "현장 기준으로 핵심만 간단히 정리해 드립니다. 네트워크 지연으로 축약본이 제공됩니다.\n\n"
+        "### 핵심 5가지\n"
+        "1) 상황 점검\n2) 필요한 공구/자재 준비\n3) 안전 확인\n4) 작업 순서대로 진행\n5) 마무리 점검\n\n"
+        "### 체크리스트(6~8)\n"
+        "- 누수/결선/고정 상태\n- 소음/진동\n- 오작동 경고\n- 마감 깔끔도\n- 재방문 필요 여부\n- 사진 기록\n\n"
+        "### 자가진단(5)\n- 증상 지속 여부\n- 특정 조건에서만 발생?\n- 최근 교체 이력\n- 임시조치 효과\n- A/S 대상 여부\n\n"
+        "### FAQ(3)\n- 소요시간? 현장 조건에 따라 1~3시간.\n- 비용? 부품/난이도에 따라 상이.\n- 사전준비? 작업 공간 확보와 전원 차단.\n\n"
+        "[이미지:대표]\n[이미지:본문1]\n[이미지:본문2]\n"
+    )
+    if mode=="sales": body += f"\n{CTA}"
+    tags = ["#집수리","#시공후기","#관악구","#강쌤철물","#생활꿀팁"]
+    imgs = [{"label":"대표","en":"Korean home context, no text overlay"}] + \
+           [{"label":f"본문{i}","en":f"support visual for section {i} of '{topic}' (no text overlay)"} for i in range(1, max(1,img_count-1)+1)]
+    titles = [f"{topic} 핵심 가이드 {i+1}" for i in range(10)]
+    return {"titles":titles, "body":body, "images":imgs[:img_count], "tags":tags}
 
 # ========================= 생성 함수 =========================
 def gen_youtube(topic, tone, n, mode, model):
@@ -358,12 +368,12 @@ def gen_youtube(topic, tone, n, mode, model):
       "You are a seasoned Korean YouTube scriptwriter. Return STRICT JSON ONLY.\n"
       "IMPORTANT: 'titles', 'description', and 'chapters' MUST be written in KOREAN.\n"
       "Image prompts MUST be in ENGLISH ONLY and include 'no text overlay'.\n"
-      "SEO titles (10, Korean) should include the main keyword early and avoid clickbait.\n"
-      "Provide exactly N chapters (3~5 sentences each). All visuals in Korean context."
+      "SEO titles (10, Korean) include the main keyword; avoid clickbait.\n"
+      "Provide exactly N chapters (3~5 sentences each)."
     )
     user = (f"[topic] {topic}\n[tone] {tone}\n[mode] {'info' if mode=='info' else 'sales'}\n[N] {n}\n"
             f"[demographics] age={final_age}, gender={final_gender}\n[schema]\n{schema_for_llm(0)}")
-    raw = chat_cached(sys, user, model, temperature)
+    raw = chat_cached(sys, user, model, min(temperature,0.7))
     data = safe_json_parse(raw, {})
     yt = data.get("youtube") or {
         "titles":[f"{topic} 핵심 가이드 {i+1}" for i in range(10)],
@@ -371,26 +381,22 @@ def gen_youtube(topic, tone, n, mode, model):
         "chapters":[{"title":f"Tip{i+1}","script":f"{topic} 핵심 포인트 {i+1}"} for i in range(n)],
         "images":{"thumbnail":{"en":"Korean home thumbnail, no text overlay"},
                   "chapters":[{"index":i+1,"en":"support visual, no text overlay"} for i in range(n)]},
-        "hashtags":["#건강","#관리","#생활"]*5
+        "hashtags":["#집수리","#관리","#생활"]*5
     }
-
     yt["titles"] = ensure_korean_lines(yt.get("titles", [])[:10], model)
     desc = yt.get("description","")
     if _is_mostly_english(desc):
         yt["description"] = chat_cached("이 설명을 한국어로 자연스럽게 바꾸세요. 과장 없이 간결하게.", desc, model, 0.2)
-
-    chs = []
+    chs=[]
     for c in yt.get("chapters", [])[:n]:
         sc = c.get("script","")
         if _is_mostly_english(sc):
             sc = chat_cached("아래 문단을 자연스러운 한국어로 바꾸세요.", sc, model, 0.2)
         chs.append({"title": c.get("title",""), "script": sc})
-    yt["chapters"] = chs
-
+    yt["chapters"]=chs
     if mode=="sales":
         desc = (yt.get("description","") or "").rstrip()
         if CTA not in desc: yt["description"] = (desc + f"\n{CTA}").strip()
-
     if st.session_state.get("people_taste", True):
         yt["description"] = humanize_ko(yt.get("description",""), mode, model)
         for c in yt["chapters"]:
@@ -398,51 +404,39 @@ def gen_youtube(topic, tone, n, mode, model):
     return yt
 
 def gen_blog(topic, tone, mode, min_chars, img_count, model):
+    """단 1회 LLM 호출로 블로그 생성. 길이 부족해도 확장 재호출 없음(속도/안정 우선)"""
     sys = (
       "[persona / voice rules]\n"
       "- 화자: 20년 차 현장 전문가 ‘강쌤’. 차분+가벼운 유머. 존대.\n"
       "- 리듬: 짧/긴 문장 섞기, 2~3문장마다 호흡. 현장 디테일 1~2개.\n"
       "- 사례/비교/주의/대안 포함. 마무리 2줄 요약+체크 3~5.\n\n"
       "You are a Korean SEO writer for Naver blog. Return STRICT JSON ONLY.\n"
-      f"Body MUST be >= {min_chars} Korean characters and include 3~5 '[이미지:대표/본문1/본문2/본문3/본문4]' markers.\n"
+      f"Body target length: >= {min_chars} Korean characters (if shorter, it's OK; do NOT call any tool again).\n"
       "Structure: 서론 → 핵심5 → 체크리스트(6~8) → 자가진단(5) → FAQ(3) → 마무리.\n"
       "Info mode forbids CTA. Sales mode allows ONE CTA at the very last line.\n"
       "Provide 10 SEO titles, 20 tags, and EN image prompts with NO TEXT OVERLAY."
     )
     user = (f"[topic] {topic}\n[tone] {tone}\n[mode] {'info' if mode=='info' else 'sales'}\n"
             f"[demographics] age={final_age}, gender={final_gender}\n[schema]\n{schema_for_llm(min_chars)}")
-    raw = chat_cached(sys, user, model, temperature)
+    raw = chat_cached(sys, user, model, min(temperature,0.6))
     data = safe_json_parse(raw, {})
-    blog = data.get("blog") or {
-        "titles":[f"{topic} 블로그 {i+1}" for i in range(10)],
-        "body":f"{topic} 기본 안내",
-        "images":[{"label":"대표","en":"Korean home context, no text overlay"}],
-        "tags":["#건강","#식단","#생활","#관리"]*5
-    }
+    blog = data.get("blog")
+    if not blog:
+        return quick_blog_fallback(topic, min_chars, img_count, mode)
 
-    if len(blog.get("body","")) < min_chars:
-        def _expand():
-            return chat_cached(
-                f"Expand to >={min_chars+300} Korean characters; keep structure & markers; RETURN JSON ONLY.",
-                json.dumps({"blog":blog}, ensure_ascii=False),
-                model, 0.5
-            )
-        try:
-            ext = run_step_with_deadline(_expand, 35)
-            blog = safe_json_parse(ext, {"blog":blog}).get("blog", blog)
-        except Exception:
-            pass
-
+    # CTA 처리(한 줄)
     if mode=="sales":
         if CTA not in blog.get("body",""):
-            blog["body"] = blog.get("body","").rstrip() + f"\n\n{CTA}"
+            blog["body"] = (blog.get("body","").rstrip() + f"\n\n{CTA}")
     else:
         blog["body"] = blog.get("body","").replace(CTA,"").strip()
 
+    # 사람맛(예산 내)
     if st.session_state.get("people_taste", True):
         blog["body"] = humanize_ko(blog.get("body",""), mode, model)
 
-    prompts = blog.get("images", [])[:img_count]
+    # 이미지 프롬프트 개수 맞추기
+    prompts = (blog.get("images") or [])[:img_count]
     while len(prompts) < img_count:
         i=len(prompts)
         prompts.append({"label":"대표" if i==0 else f"본문{i}",
@@ -461,8 +455,7 @@ def build_blog_body_with_tags(blog: dict, style: str) -> str:
 
 def build_youtube_txt(yt: dict) -> str:
     titles = "\n".join(f"{i+1}. {t}" for i,t in enumerate(yt.get('titles',[])[:10]))
-    chapters = "\n\n".join(f"[챕터 {i+1}] {c.get('title','')}\n{c.get('script','')}"
-                           for i,c in enumerate(yt.get('chapters',[])))
+    chapters = "\n\n".join(f"[챕터 {i+1}] {c.get('title','')}\n{c.get('script','')}" for i,c in enumerate(yt.get('chapters',[])))
     desc = yt.get('description','').strip()
     tags = " ".join(yt.get('hashtags',[]))
     return f"# YouTube Package\n\n## Titles\n{titles}\n\n## Description\n{desc}\n\n## Chapters\n{chapters}\n\n## Hashtags\n{tags}\n"
@@ -473,11 +466,10 @@ def build_blog_md(blog: dict) -> str:
     tags = " ".join(blog.get('tags',[]))
     return f"# Blog Package\n\n## Titles\n{titles}\n\n## Body\n{body}\n\n## Tags\n{tags}\n"
 
-# ========================= 실행 (순차 + 워치독) =========================
+# ========================= 실행 (순차 + 워치독 + 폴백) =========================
 if go:
     try:
         st.session_state["people_taste"] = people_taste
-
         do_yt   = target in ["유튜브 + 블로그","유튜브만"]
         do_blog = target in ["유튜브 + 블로그","블로그만"]
 
@@ -485,18 +477,22 @@ if go:
         status = st.status("실행 로그", expanded=False); status.write("초기화…")
         results = {}
 
-        # 유튜브
+        # 유튜브 (워치독 60s)
         if do_yt:
             prog.progress(15); prog_text.write("유튜브 패키지 생성 중…")
             status.write("유튜브 프롬프트 전송…")
-            results["yt"] = run_step_with_deadline(gen_youtube, 75, topic, tone, target_chapter, mode, MODEL)
+            results["yt"] = run_step_with_deadline(gen_youtube, 60, topic, tone, target_chapter, mode, MODEL)
             status.write("유튜브 패키지 수신 완료")
 
-        # 블로그
+        # 블로그 (워치독 60s + 타임아웃 폴백)
         if do_blog:
             prog.progress(45 if do_yt else 15); prog_text.write("블로그 패키지 생성 중…")
             status.write("블로그 프롬프트 전송…")
-            results["blog"] = run_step_with_deadline(gen_blog, 90, topic, tone, mode, blog_min, blog_imgs, MODEL)
+            try:
+                results["blog"] = run_step_with_deadline(gen_blog, 60, topic, tone, mode, blog_min, blog_imgs, MODEL)
+            except TimeoutError:
+                status.write("블로그 LLM 타임아웃 → 로컬 폴백으로 전환")
+                results["blog"] = quick_blog_fallback(topic, blog_min, blog_imgs, mode)
             status.write("블로그 패키지 수신 완료")
 
         # 렌더링
@@ -575,4 +571,4 @@ if go:
         st.exception(e)
 
 st.markdown("---")
-st.caption("무한로딩 방지(하드 타임아웃/폴백) · 세션 접근 안전화(.get) · 순차 실행 · 모델 인자 전달 · API 키 자동 점검")
+st.caption("단일 LLM 호출 · 타임아웃 폴백 · 세션 안전 접근 · 순차 실행 · API 키 자동 점검")
